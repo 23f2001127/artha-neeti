@@ -24,7 +24,7 @@ from pathlib import Path
 
 from . import config, db
 from .chunking import Chunk, chunk_stats, iter_pdf_chunks
-from .embeddings import EmbeddingQuotaError, embed_documents
+from .embeddings import EmbeddingQuotaError, embed_documents, grl
 
 # Test companies first so a partial run still covers what the README demos.
 _PRIORITY = ["RELIANCE", "TCS", "M&M"]
@@ -53,11 +53,12 @@ def _ingest_one(pdf_path: Path, group_size: int) -> dict:
     _log(f"parsing {filename} ({ticker}) ...")
     chunks: list[Chunk] = list(iter_pdf_chunks(pdf_path))
     stats = chunk_stats(chunks)
-    est_min = stats["tokens"] / max(config.EMBED_TPM, 1)
+    _tpm = grl._limits_for("embed").tpm
+    est_min = stats["tokens"] / max(_tpm, 1)
     _log(
         f"  {filename}: {stats['pages']} pages -> {stats['chunks']} chunks "
         f"({stats['tabular_chunks']} flagged tabular, {stats['tokens']:,} tokens, "
-        f"~{est_min:.0f} min at {config.EMBED_TPM:,} tok/min)"
+        f"~{est_min:.0f} min at {_tpm:,} tok/min shared budget)"
     )
     if not chunks:
         _log(f"  {filename}: no extractable text, skipping")
@@ -109,8 +110,11 @@ def run(only: list[str] | None, force: bool, group_size: int) -> int:
             _log(f"no filings match --only {only}")
             return 1
 
+    _lim = grl._limits_for("embed")
     _log(f"embedding model={config.EMBED_MODEL} dim={config.EMBED_DIM} "
-         f"tpm_cap={config.EMBED_TPM} commit_group={group_size}")
+         f"commit_group={group_size}")
+    _log(f"shared embed quota: {_lim.rpm} req/min, {_lim.tpm:,} tok/min, "
+         f"{_lim.rpd} req/day  (snapshot: {grl.snapshot().get('embed', {})})")
     _log(f"{len(pdfs)} filing(s) queued: {[p.name for p in pdfs]}")
 
     total_new = 0

@@ -4,12 +4,11 @@
 - Output truncated to ``EMBED_DIM`` and **L2-normalised** in code (Gemini only
   pre-normalises the full 3072-dim vector; reduced dims must be normalised for
   cosine similarity to behave).
-- The binding free-tier limit is **input tokens per minute** (~30k for
-  ``gemini-embedding-001``), not request count. A process-wide sliding-window
-  limiter keeps us under it; ingestion batches are built to a token budget, not a
-  fixed item count. This quota is **shared with research-mcp's Gemini calls**.
-- 429 (RESOURCE_EXHAUSTED) is retried with the server-suggested delay; a sustained
-  429 surfaces as ``EmbeddingQuotaError`` so ingestion can checkpoint and stop.
+- Rate limiting is delegated to ``shared.gemini_rate_limiter`` - a cross-process
+  limiter over the account-wide Gemini quota (per-minute tokens + requests, and
+  the 1,000/day embedding cap). Each text in a batch is one quota request.
+- 429 is retried with the server-suggested delay and the reservation is refunded;
+  a sustained wall surfaces as ``EmbeddingQuotaError`` so ingestion checkpoints.
 """
 
 from __future__ import annotations
@@ -17,14 +16,22 @@ from __future__ import annotations
 import math
 import os
 import re
+import sys
 import threading
 import time
-from collections import deque
+from pathlib import Path
 from typing import Sequence
 
 import tiktoken
 
 from . import config
+
+# Make the top-level ``shared`` package importable regardless of how this module
+# is entered (``python -m ...ingest``, the MCP server, a test).
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+from shared import gemini_rate_limiter as grl  # noqa: E402
 
 _DOC_TASK = "RETRIEVAL_DOCUMENT"
 _QUERY_TASK = "RETRIEVAL_QUERY"
@@ -36,7 +43,7 @@ class EmbeddingError(RuntimeError):
 
 
 class EmbeddingQuotaError(EmbeddingError):
-    """Raised when the rate-limit retries are exhausted (likely a daily cap)."""
+    """Raised when the shared limiter reports the quota wall (checkpoint & stop)."""
 
 
 # --------------------------------------------------------------------------- #
@@ -58,35 +65,6 @@ def _genai_client():
 
                 _client = genai.Client(api_key=key)
     return _client
-
-
-# --------------------------------------------------------------------------- #
-class _TokenRateLimiter:
-    """Sliding 60s window over token spend; also caps requests/min."""
-
-    def __init__(self, tokens_per_min: int, requests_per_min: int):
-        self.tpm = max(1, tokens_per_min)
-        self.rpm = max(1, requests_per_min)
-        self._events: deque[tuple[float, int]] = deque()  # (timestamp, tokens)
-        self._lock = threading.Lock()
-
-    def acquire(self, tokens: int) -> None:
-        tokens = max(1, min(tokens, self.tpm))  # a single batch can't exceed the budget
-        while True:
-            with self._lock:
-                now = time.monotonic()
-                while self._events and now - self._events[0][0] > 60.0:
-                    self._events.popleft()
-                used = sum(t for _, t in self._events)
-                if used + tokens <= self.tpm and len(self._events) + 1 <= self.rpm:
-                    self._events.append((now, tokens))
-                    return
-                oldest = self._events[0][0] if self._events else now
-                wait = 60.0 - (now - oldest) + 0.5
-            time.sleep(max(wait, 1.0))
-
-
-_limiter = _TokenRateLimiter(config.EMBED_TPM, config.EMBED_RPM)
 
 
 # --------------------------------------------------------------------------- #
@@ -134,7 +112,13 @@ def _embed_call(texts: list[str], token_total: int, task_type: str) -> list[list
     attempts = 6
     last: Exception | None = None
     for attempt in range(attempts):
-        _limiter.acquire(token_total)
+        # each text in the batch is one quota request; wait generously - ingestion
+        # is a long job and it's fine to sit on the per-minute window.
+        try:
+            rid = grl.acquire(token_total, "embed", count=len(texts), timeout=900.0)
+        except grl.QuotaExceededError as exc:
+            raise EmbeddingQuotaError(str(exc)) from exc
+
         try:
             resp = client.models.embed_content(model=config.EMBED_MODEL, contents=texts, config=cfg)
             out = [list(e.values) for e in resp.embeddings]
@@ -143,15 +127,21 @@ def _embed_call(texts: list[str], token_total: int, task_type: str) -> list[list
             return [_normalise(v) for v in out]
         except genai_errors.ClientError as exc:
             last = exc
+            grl.refund(rid, "embed")  # a rejected request did not consume quota
             if "RESOURCE_EXHAUSTED" in str(exc) or " 429" in str(exc):
                 time.sleep(_retry_delay(exc, 25.0 * (attempt + 1)))
                 continue
             raise EmbeddingError(f"Gemini rejected the embed request: {exc}") from exc
         except genai_errors.ServerError as exc:
             last = exc
+            grl.refund(rid, "embed")
             time.sleep(3.0 * (attempt + 1))
+        except EmbeddingError:
+            grl.refund(rid, "embed")
+            raise
         except Exception as exc:  # noqa: BLE001
             last = exc
+            grl.refund(rid, "embed")
             time.sleep(2.0)
 
     raise EmbeddingQuotaError(

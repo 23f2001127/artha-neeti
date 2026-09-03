@@ -3,3 +3,8 @@ __pycache__/
 venv/
 *.pyc
 data/filings/*.pdf
+
+# shared Gemini rate-limiter ledger (local per-machine state)
+.gemini_rate_limiter.db
+.gemini_rate_limiter.db-wal
+.gemini_rate_limiter.db-shm

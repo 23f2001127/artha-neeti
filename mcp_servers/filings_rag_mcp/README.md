@@ -48,15 +48,17 @@ tier embeds **~1,000 chunks/day** → the full ~4,200-chunk corpus takes
 stops cleanly on the daily wall and prints a resume hint; re-run it after the
 quota resets (~midnight US-Pacific).
 
-`embeddings.py` handles the per-minute limits automatically: batches to a token
-budget (`FILINGS_EMBED_BATCH_TOKENS`, default 22,000), a process-wide
-sliding-window limiter at `FILINGS_EMBED_TPM` (default 27,000), and 429 retry with
-the server-suggested `retryDelay` before raising `EmbeddingQuotaError`.
+Rate limiting is delegated to **`shared/gemini_rate_limiter.py`** — a
+**cross-process** limiter (SQLite ledger) so ingestion, the live server, and the
+LangGraph agents share one view of the account-wide Gemini quota, not three blind
+local ones. `embeddings.py` calls `grl.acquire(tokens, "embed", count=len(batch))`
+before each `embed_content` call and refunds on 429; `EMBED_BATCH_TOKENS` (default
+22,000) still controls how many texts go in one HTTP call. Tune limits via
+`GEMINI_RL_EMBED_RPM` / `_TPM` / `_RPD` — see that module's README.
 
-This is the **same Gemini quota research-mcp's `get_sentiment` uses** — a big
-ingestion eats the day's budget and starves sentiment calls (and vice versa). The
-shared-quota problem is why `project-context` memory flags building a cross-server
-Gemini rate-limiter before agent orchestration.
+This is the **same Gemini quota research-mcp's `get_sentiment` uses**, which is
+exactly why the limiter is shared — a big ingestion and the sentiment tool now
+coordinate through one ledger instead of racing.
 
 ## Ingestion (`ingest.py`)
 
@@ -244,7 +246,7 @@ mcp_servers/filings_rag_mcp/
 ├── config.py         # env loading, ticker maps, tunables
 ├── db.py             # psycopg2 + pgvector: schema, insert, similarity search
 ├── chunking.py       # pypdf parse -> page-anchored overlapping chunks + table flag
-├── embeddings.py     # Gemini embedding, L2-normalise, token-budget rate limiter
+├── embeddings.py     # Gemini embedding, L2-normalise; rate limiting -> shared/
 ├── ingest.py         # the pipeline CLI (resumable)
 ├── retrieval.py      # framework-agnostic logic behind the 3 tools
 ├── server.py         # MCP server: 3 tools + stdio entrypoint

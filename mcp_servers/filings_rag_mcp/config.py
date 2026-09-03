@@ -21,15 +21,13 @@ FILINGS_DIR = REPO_ROOT / "data" / "filings"
 EMBED_MODEL = os.environ.get("FILINGS_EMBED_MODEL", "gemini-embedding-001")
 EMBED_DIM = int(os.environ.get("FILINGS_EMBED_DIM", "768"))
 
-# Free-tier gemini-embedding-001 has three limits (observed Sept 2026):
-#   * ~30k input tokens/min   -> EMBED_TPM (the per-run throttle)
-#   * ~100 requests/min       -> EMBED_RPM (rarely the bottleneck)
-#   * 1,000 requests/DAY      -> the HARD WALL. Each chunk = 1 request, so the free
-#     tier embeds ~1,000 chunks/day; a full ~4,200-chunk ingestion is ~4-5 daily
-#     resumed runs (ingest.py is idempotent). A paid key removes this. See README.
-# Shared with research-mcp's Gemini calls.
-EMBED_TPM = int(os.environ.get("FILINGS_EMBED_TPM", "27000"))       # stay under ~30k
-EMBED_RPM = int(os.environ.get("FILINGS_EMBED_RPM", "95"))
+# Rate limiting (per-minute tokens/requests + the 1,000/day embedding cap) is
+# owned by shared/gemini_rate_limiter.py - a CROSS-PROCESS limiter, so ingestion,
+# the live server, and future agents share one view of the account quota. Tune it
+# via GEMINI_RL_EMBED_RPM / _TPM / _RPD (see that module's docstring).
+#
+# EMBED_BATCH_TOKENS only controls how many chunk texts go in one embed_content
+# HTTP call; keep it <= the limiter's per-minute token budget (default 30k).
 EMBED_BATCH_TOKENS = int(os.environ.get("FILINGS_EMBED_BATCH_TOKENS", "22000"))
 
 # --- chunking ----------------------------------------------------------------

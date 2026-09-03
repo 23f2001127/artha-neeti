@@ -21,10 +21,14 @@ precedence).
 
 **Gemini model & free-tier quota.** Default `gemini-3-flash-preview`, with
 `gemini-flash-lite-latest` then `gemini-flash-latest` as automatic fallbacks
-(each model has a *separate* quota bucket, so a 429 on one is not a 429 on the
-next). `_gemini_json` retries 5xx and 429 with bounded backoff and parses the
-server's suggested `retryDelay`. Override the primary with `GEMINI_MODEL`.
-Observed free-tier limits (Sept 2026, will drift):
+(each model has a *separate* quota bucket). `_gemini_json` retries 5xx and 429
+with bounded backoff, parses the server's `retryDelay`, and — since this change —
+clears the **shared cross-process rate limiter** (`shared/gemini_rate_limiter.py`)
+before every HTTP attempt via `grl.acquire("generate:<model>")`, so sentiment
+calls coordinate with filings-rag's embeddings and other agents against one
+account-wide quota. Override the primary model with `GEMINI_MODEL`; tune limits
+with `GEMINI_RL_GENERATE_RPM` / `_TPM` / `_RPD`. Observed free-tier limits
+(Sept 2026, will drift):
 
 | model | ~requests/min | ~requests/day |
 |-------|---------------|---------------|
@@ -34,9 +38,11 @@ Observed free-tier limits (Sept 2026, will drift):
 
 So on the free tier, **`get_sentiment` is effectively rate-limited to ~5
 calls/minute** and aggregate-mode sentiment on a basket of companies will need
-pacing or paid quota. The test script spaces its sentiment calls 14s apart for
-this reason (`GEMINI_TEST_SPACING_S` to change). Don't pin `gemini-2.5-flash` —
-it 404s for keys created after its retirement.
+pacing or paid quota. When the shared limiter reports the daily wall,
+`get_sentiment` returns `{"error": "Gemini call failed ..."}` — degrade
+gracefully, don't treat missing sentiment as neutral. The test script spaces its
+sentiment calls 14s apart (`GEMINI_TEST_SPACING_S`). Don't pin `gemini-2.5-flash`
+— it 404s for keys created after its retirement.
 
 **Why an LLM for sentiment instead of a dedicated model?** Financial-news
 sentiment is a task a general LLM handles well zero-shot, and it keeps the
@@ -180,13 +186,10 @@ integrate a paid filings feed; deliberately out of scope for v1.
 
 ## Known TODOs
 
-- **Gemini call rate-limiting for agent orchestration.** `_gemini_json` currently
-  handles a 429 *reactively* (retry + model fallback). Once multiple LangGraph
-  agents run concurrently and each may call `get_sentiment`, they can collectively
-  blow the ~5 req/min free-tier cap and stall mid-run. Add a shared in-process
-  limiter (a semaphore + minimum request spacing, or a small async queue) in
-  front of `_gemini_json` before wiring sentiment into orchestration. Not built
-  now — flagged so it is a deliberate decision, not a surprise.
+- ~~Gemini call rate-limiting for agent orchestration~~ — **done.** `_gemini_json`
+  now clears `shared/gemini_rate_limiter.py` (a cross-process SQLite limiter)
+  before every attempt, so concurrent agents + filings-rag ingestion coordinate
+  against one account-wide quota. See `shared/README.md`.
 - **`_KNOWN_NAMES` / `_KNOWN_ALIASES` cover ~13 tickers.** Extend both as the
   company universe grows; unmapped tickers get a weaker name-based fallback.
 
