@@ -1,74 +1,78 @@
-"""Cross-process rate limiter for the shared Google Gemini account quota.
+"""Cross-process rate limiter for the shared LLM-provider account quotas.
 
 Why this module exists
 ----------------------
-`research_mcp` (sentiment via `generate_content`) and `filings_rag_mcp`
-(embeddings via `embed_content`) - and, soon, several LangGraph agents - all call
-Gemini with the **same API key**, so they share one account-wide quota. Each
-process's own in-memory throttle can't see the others; run two at once and they
-blow the limit together. This module is the shared meeting point.
+ArthaNeeti's components call a handful of hosted LLM APIs with **one API key
+each**, so every component shares one account-wide quota per provider:
+
+- **Gemini embeddings** - `filings_rag_mcp` (`embed_content`)
+- **Gemini generation** - `research_mcp` sentiment (`generate_content`)
+- **Groq generation** - the LangGraph agents' reasoning / tool-selection loops
+
+Each process's own in-memory throttle can't see the others; run two at once and
+they blow the limit together (it nearly happened with Gemini's 20/day generate
+cap). This module is the shared meeting point for all of them.
 
 Design choice: a local SQLite ledger
 ------------------------------------
-Every Gemini request reserves a row `(bucket, timestamp, tokens, requests)`.
-`acquire()` opens the DB in an ``IMMEDIATE`` transaction (a cross-process write
-lock), evaluates the sliding per-minute and per-day windows against that ledger,
-and either records the reservation and returns, or releases the lock and sleeps
-until the window frees up.
+Every request reserves a row `(bucket, timestamp, tokens, requests)`. `acquire()`
+opens the DB in an ``IMMEDIATE`` transaction (a cross-process write lock),
+evaluates the sliding per-minute and per-day windows against that ledger, and
+either records the reservation and returns, or releases the lock and sleeps until
+the window frees up.
 
 Alternatives considered and rejected for a **local, single-machine, solo** setup:
 
-- *in-memory limiter* - what we have now; it can't see other processes (the whole
-  problem).
-- *Postgres* (we already hold a connection) - it's a **remote** Supabase
-  instance: ~50-150 ms per rate check, and it couples `research_mcp` (which
-  otherwise needs no database) to the DB's availability. A rate check should be
-  local and near-free.
-- *a "Gemini gateway" daemon* that every caller routes through - correct, and how
-  you'd do it at scale, but it adds a long-running process to supervise, startup
-  ordering, and an IPC layer. Too much machinery for one dev laptop.
-- *a JSON file + advisory locks* (`fcntl` / `msvcrt` / `filelock`) - SQLite
-  already does atomic cross-process read-modify-write, portably (Windows + POSIX),
-  with WAL. Hand-rolling it is more code and more edge cases.
+- *in-memory limiter* - can't see other processes (the whole problem).
+- *Postgres* (we hold a connection) - it's a **remote** Supabase instance:
+  ~50-150 ms per rate check, and it couples `research_mcp` (which otherwise needs
+  no database) to the DB. A rate check should be local and near-free.
+- *a gateway daemon* every caller proxies through - correct at scale, but adds a
+  long-running process to supervise, startup ordering, and an IPC layer. Too much
+  machinery for one dev laptop.
+- *a JSON file + advisory locks* - SQLite already does atomic cross-process
+  read-modify-write, portably (Windows + POSIX), with WAL. Hand-rolling it is more
+  code and more bugs.
 
-SQLite in WAL mode on a local disk gives genuine multi-process coordination with
+SQLite in WAL mode on local disk gives genuine multi-process coordination with
 sub-millisecond checks and **zero new dependencies** (`sqlite3` is stdlib).
-Requirement: the DB file must live on a local filesystem (not NFS/SMB) - fine for
-a single machine. Path: ``<repo>/.gemini_rate_limiter.db`` (gitignored), override
-with ``GEMINI_RATE_LIMITER_DB``.
+Requirement: DB file on a local filesystem (not NFS/SMB). Path:
+``<repo>/.llm_rate_limiter.db`` (gitignored), override with ``LLM_RATE_LIMITER_DB``.
 
-Limits (observed on the free tier, 2026-09 - RE-VERIFY, Google's quotas drift)
------------------------------------------------------------------------------
-                                    per minute              per day
-  embed    (gemini-embedding-001)   100 req / 30k tokens    1,000 req   <- hard wall
-  generate (gemini-3-flash-preview) ~5 req                  (never hit)
-  generate (gemini-flash-latest)    -                       ~20 req
+Buckets and limits (observed on free tiers, 2026-09 - RE-VERIFY, these drift)
+---------------------------------------------------------------------------
+                                       per minute            per day
+  embed    (gemini-embedding-001)      100 req / 30k tok     1,000 req  <- hard wall
+  generate (gemini-3-flash-preview)    ~5 req                ~20 req    <- also a wall
+  generate (gemini-flash-*-latest)     ~5 req                ~20 req
+  groq     (openai/gpt-oss-120b, ...)  ~30 req / 8k tok      ~1,000 req
 
-Each text in an ``embed_content`` batch counts as **one request** against both the
-per-minute and per-day request caps (a 90-text batch = 90 requests). The default
-``generate`` bucket is deliberately conservative; pass
-``request_type="generate:<model>"`` to track a model separately (its own window),
-which is what `research_mcp` does since it falls back across models.
+- ``request_type`` is ``"<family>:<model>"`` (or just ``"<family>"``). The MODEL
+  is the bucket - each Gemini/Groq model has its own quota window - so a
+  fallback chain across models multiplies effective headroom.
+- Each text in an ``embed_content`` batch counts as one request (a 90-text batch =
+  90). Pass ``count=90``.
+- ``groq``'s binding limit is **tokens/minute** (~8k), so the limiter paces agent
+  calls by token spend, not just count.
 
-Override any limit via env: ``GEMINI_RL_<FAMILY>_RPM`` / ``_TPM`` / ``_RPD``
-(family = the part before ``:``), e.g. ``GEMINI_RL_EMBED_RPD=100000`` on a paid key.
+Override any limit via env: ``LLM_RL_<FAMILY>_RPM`` / ``_TPM`` / ``_RPD``
+(family = the part before ``:``), e.g. ``LLM_RL_GROQ_TPM=600000`` on a paid key.
 
 Interface
 ---------
-    rid = acquire(estimated_tokens, request_type="embed", count=90)   # blocks
+    rid = acquire(estimated_tokens, request_type="groq:openai/gpt-oss-120b")  # blocks
     try:
-        resp = client.models.embed_content(...)
+        resp = groq_client.chat.completions.create(...)
     except RateLimited/429:
-        refund(rid, "embed")          # 429 requests do not consume quota
-        ...backoff and retry (re-acquire)...
-    # on success: nothing to do, the reservation stands
+        refund(rid, "groq:openai/gpt-oss-120b")   # a 429 did not spend quota
+        ...backoff / rotate model / retry...
 
     with reserve(est_tokens, "generate:gemini-3-flash-preview"):   # ctx-manager form
-        resp = client.models.generate_content(...)                 # auto-refunds on error
+        resp = gemini_client.models.generate_content(...)          # auto-refunds on error
 
-``acquire`` raises ``QuotaExceededError`` if the daily cap is already spent (a
-wait of hours is not "blocking appropriately") or if ``timeout`` seconds pass
-while waiting on the per-minute window.
+``acquire`` raises ``QuotaExceededError`` when the daily cap for a bucket is
+already spent (waiting hours is not "blocking appropriately") or when ``timeout``
+seconds pass while waiting on the per-minute window.
 """
 
 from __future__ import annotations
@@ -86,7 +90,10 @@ from typing import Iterator
 try:  # stdlib on 3.9+; needs the `tzdata` package on Windows (it's in requirements.txt)
     from zoneinfo import ZoneInfo
 
-    _RESET_TZ = ZoneInfo("America/Los_Angeles")  # Google free-tier daily quotas reset midnight PT
+    # Gemini free-tier daily quotas reset midnight US-Pacific. Groq's daily reset is
+    # murkier (headers suggest a rolling window); a Pacific-midnight day boundary is
+    # a close-enough, conservative approximation for all families.
+    _RESET_TZ = ZoneInfo("America/Los_Angeles")
 except Exception:  # pragma: no cover
     _RESET_TZ = timezone.utc
 
@@ -103,19 +110,23 @@ class Limits:
 
 
 _DEFAULTS: dict[str, Limits] = {
+    # Gemini embeddings - each chunk is one request; 1,000/day is a genuine wall.
     "embed": Limits(rpm=100, tpm=30_000, rpd=1_000),
-    # 'generate' is per-MODEL (callers pass request_type="generate:<model>"). The
-    # free tier is stingy and moved during development: gemini-3-flash-preview is
-    # now ~20 req/DAY, ~5 req/min. Defaulting tight means the limiter proactively
-    # trips the wall and the caller's model-fallback chain kicks in *before* a
-    # messy 429. Raise per family with GEMINI_RL_GENERATE_RPD etc. on a paid key.
+    # Gemini generation (research-mcp sentiment). The free tier is stingy and moved
+    # during development: ~20 req/DAY, ~5 req/min per model. Defaulting tight means
+    # the limiter trips the wall and the caller's model-fallback chain kicks in
+    # *before* a messy 429.
     "generate": Limits(rpm=6, tpm=240_000, rpd=20),
+    # Groq generation (the agents' reasoning). Free tier per model, from response
+    # headers: 1,000 req/day, ~8k tokens/min (a token bucket - the binding limit),
+    # ~30 req/min. Kept just under with headroom for concurrent agents.
+    "groq": Limits(rpm=27, tpm=7_500, rpd=950),
 }
 _FALLBACK = Limits(rpm=6, tpm=200_000, rpd=20)
 
 # The per-minute window. Overridable only so the test suite can run in seconds
 # instead of minutes; leave it at 60 in real use.
-_MIN_WINDOW = float(os.environ.get("GEMINI_RL_WINDOW_SECONDS", "60"))
+_MIN_WINDOW = float(os.environ.get("LLM_RL_WINDOW_SECONDS", "60"))
 _PRUNE_AGE = 26 * 3600  # keep ~a day plus slack, so the daily window is always covered
 
 
@@ -133,7 +144,7 @@ def _limits_for(request_type: str) -> Limits:
     base = _DEFAULTS.get(fam, _FALLBACK)
 
     def _env(suffix: str, default: int) -> int:
-        raw = os.environ.get(f"GEMINI_RL_{fam.upper()}_{suffix}")
+        raw = os.environ.get(f"LLM_RL_{fam.upper()}_{suffix}")
         if raw is None:
             return default
         try:
@@ -145,10 +156,10 @@ def _limits_for(request_type: str) -> Limits:
 
 
 def _db_path() -> Path:
-    override = os.environ.get("GEMINI_RATE_LIMITER_DB")
+    override = os.environ.get("LLM_RATE_LIMITER_DB")
     if override:
         return Path(override)
-    return Path(__file__).resolve().parent.parent / ".gemini_rate_limiter.db"
+    return Path(__file__).resolve().parent.parent / ".llm_rate_limiter.db"
 
 
 def _day_start_epoch(now: float) -> float:
@@ -173,22 +184,34 @@ def _conn() -> sqlite3.Connection:
         return conn
     path = _db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), timeout=45.0, isolation_level=None)  # manual txns
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=45000")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS gemini_events (
-               id       INTEGER PRIMARY KEY AUTOINCREMENT,
-               bucket   TEXT NOT NULL,
-               ts       REAL NOT NULL,
-               tokens   INTEGER NOT NULL,
-               requests INTEGER NOT NULL DEFAULT 1
-           )"""
-    )
-    conn.execute("CREATE INDEX IF NOT EXISTS ix_bucket_ts ON gemini_events (bucket, ts)")
-    _local.conn = conn
-    return conn
+
+    # N processes cold-starting against a brand-new DB file at once can collide on
+    # the WAL switch / CREATE TABLE ("database is locked"). Set busy_timeout FIRST
+    # so every later statement waits, and retry the whole setup a few times.
+    last: sqlite3.Error | None = None
+    for attempt in range(8):
+        conn = sqlite3.connect(str(path), timeout=60.0, isolation_level=None)
+        try:
+            conn.execute("PRAGMA busy_timeout=60000")
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS llm_events (
+                       id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                       bucket   TEXT NOT NULL,
+                       ts       REAL NOT NULL,
+                       tokens   INTEGER NOT NULL,
+                       requests INTEGER NOT NULL DEFAULT 1
+                   )"""
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS ix_bucket_ts ON llm_events (bucket, ts)")
+            _local.conn = conn
+            return conn
+        except sqlite3.OperationalError as exc:
+            last = exc
+            conn.close()
+            time.sleep(0.25 * (attempt + 1))
+    raise sqlite3.OperationalError(f"could not open the rate-limiter DB after retries: {last}")
 
 
 def _rollback(conn: sqlite3.Connection) -> None:
@@ -233,11 +256,11 @@ def acquire(
         now = time.time()
         conn.execute("BEGIN IMMEDIATE")
         try:
-            conn.execute("DELETE FROM gemini_events WHERE ts < ?", (now - _PRUNE_AGE,))
+            conn.execute("DELETE FROM llm_events WHERE ts < ?", (now - _PRUNE_AGE,))
 
             day_start = _day_start_epoch(now)
             day_used = conn.execute(
-                "SELECT COALESCE(SUM(requests), 0) FROM gemini_events "
+                "SELECT COALESCE(SUM(requests), 0) FROM llm_events "
                 "WHERE bucket = ? AND ts >= ?",
                 (bucket, day_start),
             ).fetchone()[0]
@@ -245,7 +268,7 @@ def acquire(
                 _rollback(conn)
                 hrs = (_next_day_start_epoch(now) - now) / 3600.0
                 raise QuotaExceededError(
-                    f"gemini '{bucket}': daily cap {lim.rpd} would be exceeded "
+                    f"llm quota '{bucket}': daily cap {lim.rpd} would be exceeded "
                     f"({day_used} used, +{n} requested). Resets in ~{hrs:.1f}h "
                     f"(midnight {_RESET_TZ}). Use a paid key or wait."
                 )
@@ -253,7 +276,7 @@ def acquire(
             win_start = now - _MIN_WINDOW
             row = conn.execute(
                 "SELECT COALESCE(SUM(requests), 0), COALESCE(SUM(tokens), 0) "
-                "FROM gemini_events WHERE bucket = ? AND ts >= ?",
+                "FROM llm_events WHERE bucket = ? AND ts >= ?",
                 (bucket, win_start),
             ).fetchone()
             min_reqs, min_tokens = row[0], row[1]
@@ -261,14 +284,14 @@ def acquire(
             token_ok = min_tokens + est <= lim.tpm or (min_tokens == 0 and est > lim.tpm)
             if min_reqs + n <= lim.rpm and token_ok:
                 cur = conn.execute(
-                    "INSERT INTO gemini_events (bucket, ts, tokens, requests) VALUES (?,?,?,?)",
+                    "INSERT INTO llm_events (bucket, ts, tokens, requests) VALUES (?,?,?,?)",
                     (bucket, now, est, n),
                 )
                 conn.execute("COMMIT")
                 return int(cur.lastrowid)
 
             oldest = conn.execute(
-                "SELECT MIN(ts) FROM gemini_events WHERE bucket = ? AND ts >= ?",
+                "SELECT MIN(ts) FROM llm_events WHERE bucket = ? AND ts >= ?",
                 (bucket, win_start),
             ).fetchone()[0]
             _rollback(conn)
@@ -282,7 +305,7 @@ def acquire(
         remaining = deadline - time.monotonic()
         if wait > remaining:
             raise QuotaExceededError(
-                f"gemini '{bucket}': still per-minute rate-limited after "
+                f"llm quota '{bucket}': still per-minute rate-limited after "
                 f"{timeout:.0f}s of waiting."
             )
         time.sleep(min(wait, max(0.2, remaining)))
@@ -295,7 +318,7 @@ def refund(reservation_id: int | None, request_type: str = "generate") -> None:
     conn = _conn()
     conn.execute("BEGIN IMMEDIATE")
     try:
-        conn.execute("DELETE FROM gemini_events WHERE id = ?", (int(reservation_id),))
+        conn.execute("DELETE FROM llm_events WHERE id = ?", (int(reservation_id),))
         conn.execute("COMMIT")
     except sqlite3.Error:
         _rollback(conn)
@@ -331,16 +354,16 @@ def snapshot() -> dict:
     out: dict[str, dict] = {}
     conn.execute("BEGIN IMMEDIATE")
     try:
-        buckets = [r[0] for r in conn.execute("SELECT DISTINCT bucket FROM gemini_events")]
+        buckets = [r[0] for r in conn.execute("SELECT DISTINCT bucket FROM llm_events")]
         for bucket in buckets:
             lim = _limits_for(bucket)
             m = conn.execute(
                 "SELECT COALESCE(SUM(requests),0), COALESCE(SUM(tokens),0) "
-                "FROM gemini_events WHERE bucket=? AND ts>=?",
+                "FROM llm_events WHERE bucket=? AND ts>=?",
                 (bucket, win_start),
             ).fetchone()
             d = conn.execute(
-                "SELECT COALESCE(SUM(requests),0) FROM gemini_events WHERE bucket=? AND ts>=?",
+                "SELECT COALESCE(SUM(requests),0) FROM llm_events WHERE bucket=? AND ts>=?",
                 (bucket, day_start),
             ).fetchone()[0]
             out[bucket] = {
@@ -361,7 +384,7 @@ def reset() -> None:
     conn = _conn()
     conn.execute("BEGIN IMMEDIATE")
     try:
-        conn.execute("DELETE FROM gemini_events")
+        conn.execute("DELETE FROM llm_events")
         conn.execute("COMMIT")
     except sqlite3.Error:
         _rollback(conn)

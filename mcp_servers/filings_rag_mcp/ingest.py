@@ -24,7 +24,7 @@ from pathlib import Path
 
 from . import config, db
 from .chunking import Chunk, chunk_stats, iter_pdf_chunks
-from .embeddings import EmbeddingQuotaError, embed_documents, grl
+from .embeddings import EmbeddingQuotaError, embed_documents, rl
 
 # Test companies first so a partial run still covers what the README demos.
 _PRIORITY = ["RELIANCE", "TCS", "M&M"]
@@ -53,7 +53,7 @@ def _ingest_one(pdf_path: Path, group_size: int) -> dict:
     _log(f"parsing {filename} ({ticker}) ...")
     chunks: list[Chunk] = list(iter_pdf_chunks(pdf_path))
     stats = chunk_stats(chunks)
-    _tpm = grl._limits_for("embed").tpm
+    _tpm = rl._limits_for("embed").tpm
     est_min = stats["tokens"] / max(_tpm, 1)
     _log(
         f"  {filename}: {stats['pages']} pages -> {stats['chunks']} chunks "
@@ -110,11 +110,11 @@ def run(only: list[str] | None, force: bool, group_size: int) -> int:
             _log(f"no filings match --only {only}")
             return 1
 
-    _lim = grl._limits_for("embed")
+    _lim = rl._limits_for("embed")
     _log(f"embedding model={config.EMBED_MODEL} dim={config.EMBED_DIM} "
          f"commit_group={group_size}")
     _log(f"shared embed quota: {_lim.rpm} req/min, {_lim.tpm:,} tok/min, "
-         f"{_lim.rpd} req/day  (snapshot: {grl.snapshot().get('embed', {})})")
+         f"{_lim.rpd} req/day  (snapshot: {rl.snapshot().get('embed', {})})")
     _log(f"{len(pdfs)} filing(s) queued: {[p.name for p in pdfs]}")
 
     total_new = 0

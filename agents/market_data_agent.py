@@ -13,10 +13,13 @@ How it's wired (deliberately, per the project's architecture rules)
   subprocess and talks to it with the MCP client protocol - it does NOT import
   ``market_data.py``'s functions. That's the point of the MCP layer; the Planner
   will connect the same way.
-- **Gemini through the shared limiter.** The chat model is subclassed so every
-  LLM call (tool-selection loop *and* the final synthesis call) first clears
-  ``shared/gemini_rate_limiter.py``. Nothing here touches Gemini outside its
-  awareness.
+- **Groq for reasoning, through the shared limiter.** The ReAct tool-selection
+  loop and the final synthesis call run on Groq (`langchain-groq` / `ChatGroq`),
+  chosen because Gemini's free-tier *generate* quota (~20/day/model) can't sustain
+  multiple agents each burning several calls per query. Every LLM call still
+  clears ``shared/llm_rate_limiter.py`` (a ``groq:<model>`` bucket) - nothing here
+  calls an LLM outside the shared limiter's awareness. See ``agents/README.md``
+  for why Gemini stays for sentiment (research-mcp) and embeddings (filings-rag).
 - **Provenance preserved.** ``as_of`` / ``fiscal_year`` / ``roe_source`` /
   ``last_fiscal_year_end`` from the MCP responses are lifted into a top-level
   ``provenance`` block and the full tool output is kept in ``raw_data`` - the
@@ -48,20 +51,21 @@ load_dotenv(_REPO_ROOT / ".env", override=False)
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage  # noqa: E402
 from langchain_core.tools import StructuredTool  # noqa: E402
-from langchain_google_genai import ChatGoogleGenerativeAI  # noqa: E402
+from langchain_groq import ChatGroq  # noqa: E402
 from langgraph.prebuilt import create_react_agent  # noqa: E402
 from mcp.client import Client  # noqa: E402
 from mcp.client.stdio import StdioServerParameters  # noqa: E402
 
-from shared import gemini_rate_limiter as grl  # noqa: E402
+from shared import llm_rate_limiter as rl  # noqa: E402
 
 MARKET_DATA_SERVER = str(_REPO_ROOT / "mcp_servers" / "market_data_mcp" / "server.py")
 
-# Primary + fallbacks. Each free-tier flash model has its own tiny daily bucket
-# (~20/day); the shared limiter trips per model and _RateLimitedChatGoogle rotates
-# to the next. GEMINI_AGENT_MODEL overrides the primary.
-DEFAULT_MODEL = os.environ.get("GEMINI_AGENT_MODEL", "gemini-3-flash-preview")
-_FALLBACK_MODELS = ("gemini-flash-lite-latest", "gemini-flash-latest")
+# Groq reasoning models, primary + fallbacks. Each has its own free-tier bucket
+# (~1,000 req/day, ~8k tokens/min - the token cap binds), so the fallback chain
+# multiplies headroom. llama-3.3-70b was retired on Groq; gpt-oss-120b is the
+# current large general reasoner. GROQ_AGENT_MODEL overrides the primary.
+DEFAULT_MODEL = os.environ.get("GROQ_AGENT_MODEL", "openai/gpt-oss-120b")
+_FALLBACK_MODELS = ("qwen/qwen3.8-27b", "openai/gpt-oss-20b")
 _RECURSION_LIMIT = 14  # tool-selection loop: 4 tools, a couple of retries of headroom
 
 
@@ -86,7 +90,7 @@ def _flatten_exc(exc: BaseException) -> list[BaseException]:
 
 
 # --------------------------------------------------------------------------- #
-# Gemini chat model, rate-limited through the shared cross-process limiter
+# Groq chat model, rate-limited through the shared cross-process limiter
 # --------------------------------------------------------------------------- #
 def _estimate_tokens(messages: list) -> int:
     chars = 0
@@ -97,101 +101,98 @@ def _estimate_tokens(messages: list) -> int:
 
 
 def _is_rate_error(exc: BaseException) -> bool:
-    text = str(exc)
-    return "RESOURCE_EXHAUSTED" in text or " 429" in text or "quota" in text.lower()
+    text = str(exc).lower()
+    return (
+        "resource_exhausted" in text
+        or " 429" in text
+        or "429" in text
+        or "rate_limit" in text
+        or "rate limit" in text
+        or "quota" in text
+    )
 
 
-class _RateLimitedChatGoogle(ChatGoogleGenerativeAI):
-    """ChatGoogleGenerativeAI that clears shared/gemini_rate_limiter before every
-    call and rotates through a model-fallback chain when a model's shared budget
-    is spent or it 429s. One object, so it drops straight into create_react_agent.
+class _RateLimitedChatGroq(ChatGroq):
+    """ChatGroq that clears shared/llm_rate_limiter before every call and rotates
+    through a model-fallback chain when a model's shared budget is spent or it
+    429s. One object, so it drops straight into create_react_agent.
+
+    The candidate chain is stashed via object.__setattr__ (pydantic ignores names
+    it doesn't declare as fields); ``model_name`` is swapped in place per attempt.
     """
 
-    # extra (private) attribute for the candidate chain; pydantic ignores names
-    # not declared as fields, so stash it via object.__setattr__ in _make_model.
     def _candidates(self) -> list[str]:
-        chain = list(getattr(self, "_rl_chain", None) or [self.model])
-        return chain
-
-    def _run_with_rotation(self, messages, call):
-        est = _estimate_tokens(messages)
-        errs: list[str] = []
-        original = self.model
-        for cand in self._candidates():
-            bucket = f"generate:{cand.split('/')[-1]}"
-            try:
-                rid = grl.acquire(est, bucket, timeout=45.0)
-            except grl.QuotaExceededError as exc:
-                errs.append(f"{cand}: shared budget spent ({exc})")
-                continue
-            object.__setattr__(self, "model", cand)
-            try:
-                return call()
-            except grl.QuotaExceededError as exc:
-                grl.refund(rid, bucket)
-                errs.append(f"{cand}: {exc}")
-            except BaseException as exc:  # noqa: BLE001
-                if _is_rate_error(exc):
-                    grl.refund(rid, bucket)
-                    errs.append(f"{cand}: 429 {str(exc)[:120]}")
-                    continue
-                object.__setattr__(self, "model", original)
-                raise
-            finally:
-                object.__setattr__(self, "model", original)
-        raise grl.QuotaExceededError(
-            "all candidate Gemini models are rate/quota limited: " + " | ".join(errs)
-        )
+        return list(getattr(self, "_rl_chain", None) or [self.model_name])
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        return self._run_with_rotation(
-            messages, lambda: super(_RateLimitedChatGoogle, self)._generate(
-                messages, stop, run_manager, **kwargs
-            )
+        est = _estimate_tokens(messages)
+        errs: list[str] = []
+        original = self.model_name
+        for cand in self._candidates():
+            bucket = f"groq:{cand}"
+            try:
+                rid = rl.acquire(est, bucket, timeout=120.0)
+            except rl.QuotaExceededError:
+                errs.append(f"{cand}: shared budget spent")
+                continue
+            object.__setattr__(self, "model_name", cand)
+            try:
+                return super()._generate(messages, stop, run_manager, **kwargs)
+            except BaseException as exc:  # noqa: BLE001
+                rl.refund(rid, bucket)
+                if _is_rate_error(exc):
+                    errs.append(f"{cand}: 429")
+                    continue
+                object.__setattr__(self, "model_name", original)
+                raise
+            finally:
+                object.__setattr__(self, "model_name", original)
+        raise rl.QuotaExceededError(
+            "all candidate Groq models are rate/quota limited: " + " | ".join(errs)
         )
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
         # the shared limiter is sync (time.sleep); keep it off the event loop
         est = _estimate_tokens(messages)
         errs: list[str] = []
-        original = self.model
+        original = self.model_name
         for cand in self._candidates():
-            bucket = f"generate:{cand.split('/')[-1]}"
+            bucket = f"groq:{cand}"
             try:
                 rid = await asyncio.to_thread(
-                    functools.partial(grl.acquire, est, bucket, timeout=45.0)
+                    functools.partial(rl.acquire, est, bucket, timeout=120.0)
                 )
-            except grl.QuotaExceededError as exc:
+            except rl.QuotaExceededError:
                 errs.append(f"{cand}: shared budget spent")
                 continue
-            object.__setattr__(self, "model", cand)
+            object.__setattr__(self, "model_name", cand)
             try:
                 return await super()._agenerate(messages, stop, run_manager, **kwargs)
             except BaseException as exc:  # noqa: BLE001
-                grl.refund(rid, bucket)
+                rl.refund(rid, bucket)
                 if _is_rate_error(exc):
                     errs.append(f"{cand}: 429")
                     continue
-                object.__setattr__(self, "model", original)
+                object.__setattr__(self, "model_name", original)
                 raise
             finally:
-                object.__setattr__(self, "model", original)
-        raise grl.QuotaExceededError(
-            "all candidate Gemini models are rate/quota limited: " + " | ".join(errs)
+                object.__setattr__(self, "model_name", original)
+        raise rl.QuotaExceededError(
+            "all candidate Groq models are rate/quota limited: " + " | ".join(errs)
         )
 
 
-def _make_model(model_name: str) -> _RateLimitedChatGoogle:
-    key = os.environ.get("GEMINI_API_KEY")
+def _make_model(model_name: str) -> _RateLimitedChatGroq:
+    key = os.environ.get("GROQ_API_KEY")
     if not key:
         raise MarketDataAgentError(
-            "GEMINI_API_KEY is not set (checked the environment and the project .env)."
+            "GROQ_API_KEY is not set (checked the environment and the project .env)."
         )
-    m = _RateLimitedChatGoogle(
+    m = _RateLimitedChatGroq(
         model=model_name,
         temperature=0.0,
         max_retries=0,  # the shared limiter + rotation are the only retry authority
-        google_api_key=key,
+        groq_api_key=key,
     )
     chain = [model_name] + [x for x in _FALLBACK_MODELS if x != model_name]
     object.__setattr__(m, "_rl_chain", chain)
@@ -293,7 +294,7 @@ class _AgentSynthesis(BaseModel):
     summary: str = Field(description="2-4 sentence human-readable summary")
 
 
-async def _synthesize(model: _RateLimitedChatGoogle, query: str, call_log: list[dict]) -> _AgentSynthesis:
+async def _synthesize(model: _RateLimitedChatGroq, query: str, call_log: list[dict]) -> _AgentSynthesis:
     structured = model.with_structured_output(_AgentSynthesis)
     payload = json.dumps(
         [{"tool": c["tool"], "args": c["args"], "result": c["result"]} for c in call_log],
@@ -400,7 +401,7 @@ async def run(query: str, *, model_name: str = DEFAULT_MODEL) -> dict:
             trace = _extract_trace(state["messages"])
     except BaseException as exc:  # noqa: BLE001 - unwrap anyio/MCP ExceptionGroups
         flat = _flatten_exc(exc)
-        quota = next((e for e in flat if isinstance(e, grl.QuotaExceededError)), None)
+        quota = next((e for e in flat if isinstance(e, rl.QuotaExceededError)), None)
         primary = quota or (flat[0] if flat else exc)
         return {
             "query": query,

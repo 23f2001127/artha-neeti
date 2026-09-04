@@ -41,7 +41,7 @@ load_dotenv(_REPO_ROOT / ".env", override=False)
 # ``import research`` by server.py, so the repo root isn't on the path yet).
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-from shared import gemini_rate_limiter as grl  # noqa: E402
+from shared import llm_rate_limiter as rl  # noqa: E402
 
 # gemini-2.5-flash is now 404 for new API keys; gemini-flash-latest is the alias
 # but gets overloaded (503) at times, so we try a small chain.
@@ -273,7 +273,7 @@ def _gemini_json(prompt: str, schema: type, *, max_attempts: int = 2) -> tuple[A
     """One structured-output Gemini call.
 
     Before every HTTP attempt it clears the **shared cross-process rate limiter**
-    (``shared.gemini_rate_limiter``) so this call is accounted against the same
+    (``shared.llm_rate_limiter``) so this call is accounted against the same
     account-wide Gemini quota that filings-rag's embeddings and other agents use.
     Then: retries transient 5xx / 429 with a bounded backoff, and falls through a
     small chain of models (each its own quota bucket) so a per-model wall does not
@@ -305,8 +305,8 @@ def _gemini_json(prompt: str, schema: type, *, max_attempts: int = 2) -> tuple[A
         is_last_model = model_idx == len(models_to_try) - 1
         for attempt in range(max_attempts):
             try:
-                rid = grl.acquire(est_tokens, f"generate:{model}", timeout=90.0)
-            except grl.QuotaExceededError as exc:
+                rid = rl.acquire(est_tokens, f"generate:{model}", timeout=90.0)
+            except rl.QuotaExceededError as exc:
                 # this model's shared budget is spent - move to the next model
                 quota_walls.append(str(exc))
                 last_err = exc
@@ -321,12 +321,12 @@ def _gemini_json(prompt: str, schema: type, *, max_attempts: int = 2) -> tuple[A
                 return parsed, model
             except genai_errors.ServerError as exc:  # 5xx - transient
                 last_err = exc
-                grl.refund(rid, f"generate:{model}")
+                rl.refund(rid, f"generate:{model}")
                 if attempt < max_attempts - 1:
                     time.sleep(2.0 * (attempt + 1))
             except genai_errors.ClientError as exc:  # 4xx
                 last_err = exc
-                grl.refund(rid, f"generate:{model}")  # a rejected request didn't spend quota
+                rl.refund(rid, f"generate:{model}")  # a rejected request didn't spend quota
                 text = str(exc)
                 if "RESOURCE_EXHAUSTED" in text or " 429" in text:
                     if is_last_model and attempt < max_attempts - 1:
@@ -338,11 +338,11 @@ def _gemini_json(prompt: str, schema: type, *, max_attempts: int = 2) -> tuple[A
                 raise ResearchError(f"Gemini rejected the request: {exc}") from exc
             except (json.JSONDecodeError, ValueError) as exc:  # unparseable output
                 last_err = exc
-                grl.refund(rid, f"generate:{model}")
+                rl.refund(rid, f"generate:{model}")
                 time.sleep(1.0)
             except Exception as exc:  # noqa: BLE001
                 last_err = exc
-                grl.refund(rid, f"generate:{model}")
+                rl.refund(rid, f"generate:{model}")
                 time.sleep(1.0)
 
     detail = "; ".join(quota_walls) if quota_walls else str(last_err)

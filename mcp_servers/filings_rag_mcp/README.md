@@ -48,13 +48,13 @@ tier embeds **~1,000 chunks/day** → the full ~4,200-chunk corpus takes
 stops cleanly on the daily wall and prints a resume hint; re-run it after the
 quota resets (~midnight US-Pacific).
 
-Rate limiting is delegated to **`shared/gemini_rate_limiter.py`** — a
+Rate limiting is delegated to **`shared/llm_rate_limiter.py`** — a
 **cross-process** limiter (SQLite ledger) so ingestion, the live server, and the
 LangGraph agents share one view of the account-wide Gemini quota, not three blind
-local ones. `embeddings.py` calls `grl.acquire(tokens, "embed", count=len(batch))`
+local ones. `embeddings.py` calls `rl.acquire(tokens, "embed", count=len(batch))`
 before each `embed_content` call and refunds on 429; `EMBED_BATCH_TOKENS` (default
 22,000) still controls how many texts go in one HTTP call. Tune limits via
-`GEMINI_RL_EMBED_RPM` / `_TPM` / `_RPD` — see that module's README.
+`LLM_RL_EMBED_RPM` / `_TPM` / `_RPD` — see that module's README.
 
 This is the **same Gemini quota research-mcp's `get_sentiment` uses**, which is
 exactly why the limiter is shared — a big ingestion and the sentiment tool now

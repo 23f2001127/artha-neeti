@@ -22,9 +22,9 @@ EMBED_MODEL = os.environ.get("FILINGS_EMBED_MODEL", "gemini-embedding-001")
 EMBED_DIM = int(os.environ.get("FILINGS_EMBED_DIM", "768"))
 
 # Rate limiting (per-minute tokens/requests + the 1,000/day embedding cap) is
-# owned by shared/gemini_rate_limiter.py - a CROSS-PROCESS limiter, so ingestion,
+# owned by shared/llm_rate_limiter.py - a CROSS-PROCESS limiter, so ingestion,
 # the live server, and future agents share one view of the account quota. Tune it
-# via GEMINI_RL_EMBED_RPM / _TPM / _RPD (see that module's docstring).
+# via LLM_RL_EMBED_RPM / _TPM / _RPD (see that module's docstring).
 #
 # EMBED_BATCH_TOKENS only controls how many chunk texts go in one embed_content
 # HTTP call; keep it <= the limiter's per-minute token budget (default 30k).

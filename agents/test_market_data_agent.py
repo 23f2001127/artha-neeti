@@ -9,16 +9,12 @@ Then a few assertions on which tools were called for which query.
 
     python agents/test_market_data_agent.py
 
-Needs GEMINI_API_KEY + network. Spawns market-data-mcp as a subprocess. Makes
-~3-4 rate-limited Gemini calls per query (ReAct loop + one synthesis call).
+Needs GROQ_API_KEY + network. Spawns market-data-mcp as a subprocess. Makes
+~3-5 rate-limited Groq calls per query (ReAct loop + one synthesis call).
 
-Free-tier Gemini generate quota is tiny (~20/day for gemini-3-flash-preview and
-gemini-flash-latest; gemini-flash-lite-latest tolerates more). The shared limiter
-defaults conservatively; if it blocks a run, raise it and/or point at the roomier
-model:
-
-    GEMINI_RL_GENERATE_RPD=300 GEMINI_AGENT_MODEL=gemini-flash-lite-latest \\
-        python agents/test_market_data_agent.py
+Groq's free tier is generous (~1,000 req/day/model) but its ~8k tokens/min cap
+binds - the shared limiter paces calls by token spend, so a multi-tool query can
+take a minute or two. Override with `GROQ_AGENT_MODEL` or `LLM_RL_GROQ_TPM=...`.
 """
 
 from __future__ import annotations
@@ -33,11 +29,11 @@ try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
     pass
-for _n in ("google_genai", "google_genai.models", "httpx", "langchain_google_genai"):
+for _n in ("groq", "httpx", "langchain_groq"):
     logging.getLogger(_n).setLevel(logging.ERROR)
 
 from agents.market_data_agent import run_sync  # noqa: E402
-from shared import gemini_rate_limiter as grl  # noqa: E402
+from shared import llm_rate_limiter as rl  # noqa: E402
 
 CASES = [
     {
@@ -102,8 +98,8 @@ def show_result(r: dict) -> None:
 
 # --------------------------------------------------------------------------- #
 if __name__ == "__main__":
-    print(f"model chain primary = {os.environ.get('GEMINI_AGENT_MODEL', 'gemini-3-flash-preview')}")
-    print(f"limiter snapshot at start: {json.dumps(grl.snapshot())}")
+    print(f"model chain primary = {os.environ.get('GROQ_AGENT_MODEL', 'openai/gpt-oss-120b')}")
+    print(f"limiter snapshot at start: {json.dumps(rl.snapshot())}")
 
     for case in CASES:
         section(f"{case['name']}  ::  {case['query']!r}")
@@ -138,7 +134,7 @@ if __name__ == "__main__":
         )
 
     section("SUMMARY")
-    print(f"limiter snapshot at end: {json.dumps(grl.snapshot())}")
+    print(f"limiter snapshot at end: {json.dumps(rl.snapshot())}")
     if _failures:
         print(f"\n  {len(_failures)} check(s) FAILED:")
         for f in _failures:

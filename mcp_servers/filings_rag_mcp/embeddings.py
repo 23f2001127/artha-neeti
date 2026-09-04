@@ -4,7 +4,7 @@
 - Output truncated to ``EMBED_DIM`` and **L2-normalised** in code (Gemini only
   pre-normalises the full 3072-dim vector; reduced dims must be normalised for
   cosine similarity to behave).
-- Rate limiting is delegated to ``shared.gemini_rate_limiter`` - a cross-process
+- Rate limiting is delegated to ``shared.llm_rate_limiter`` - a cross-process
   limiter over the account-wide Gemini quota (per-minute tokens + requests, and
   the 1,000/day embedding cap). Each text in a batch is one quota request.
 - 429 is retried with the server-suggested delay and the reservation is refunded;
@@ -31,7 +31,7 @@ from . import config
 _REPO_ROOT = str(Path(__file__).resolve().parents[2])
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
-from shared import gemini_rate_limiter as grl  # noqa: E402
+from shared import llm_rate_limiter as rl  # noqa: E402
 
 _DOC_TASK = "RETRIEVAL_DOCUMENT"
 _QUERY_TASK = "RETRIEVAL_QUERY"
@@ -115,8 +115,8 @@ def _embed_call(texts: list[str], token_total: int, task_type: str) -> list[list
         # each text in the batch is one quota request; wait generously - ingestion
         # is a long job and it's fine to sit on the per-minute window.
         try:
-            rid = grl.acquire(token_total, "embed", count=len(texts), timeout=900.0)
-        except grl.QuotaExceededError as exc:
+            rid = rl.acquire(token_total, "embed", count=len(texts), timeout=900.0)
+        except rl.QuotaExceededError as exc:
             raise EmbeddingQuotaError(str(exc)) from exc
 
         try:
@@ -127,21 +127,21 @@ def _embed_call(texts: list[str], token_total: int, task_type: str) -> list[list
             return [_normalise(v) for v in out]
         except genai_errors.ClientError as exc:
             last = exc
-            grl.refund(rid, "embed")  # a rejected request did not consume quota
+            rl.refund(rid, "embed")  # a rejected request did not consume quota
             if "RESOURCE_EXHAUSTED" in str(exc) or " 429" in str(exc):
                 time.sleep(_retry_delay(exc, 25.0 * (attempt + 1)))
                 continue
             raise EmbeddingError(f"Gemini rejected the embed request: {exc}") from exc
         except genai_errors.ServerError as exc:
             last = exc
-            grl.refund(rid, "embed")
+            rl.refund(rid, "embed")
             time.sleep(3.0 * (attempt + 1))
         except EmbeddingError:
-            grl.refund(rid, "embed")
+            rl.refund(rid, "embed")
             raise
         except Exception as exc:  # noqa: BLE001
             last = exc
-            grl.refund(rid, "embed")
+            rl.refund(rid, "embed")
             time.sleep(2.0)
 
     raise EmbeddingQuotaError(

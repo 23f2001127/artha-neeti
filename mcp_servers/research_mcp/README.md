@@ -23,11 +23,11 @@ precedence).
 `gemini-flash-lite-latest` then `gemini-flash-latest` as automatic fallbacks
 (each model has a *separate* quota bucket). `_gemini_json` retries 5xx and 429
 with bounded backoff, parses the server's `retryDelay`, and — since this change —
-clears the **shared cross-process rate limiter** (`shared/gemini_rate_limiter.py`)
-before every HTTP attempt via `grl.acquire("generate:<model>")`, so sentiment
+clears the **shared cross-process rate limiter** (`shared/llm_rate_limiter.py`)
+before every HTTP attempt via `rl.acquire("generate:<model>")`, so sentiment
 calls coordinate with filings-rag's embeddings and other agents against one
 account-wide quota. Override the primary model with `GEMINI_MODEL`; tune limits
-with `GEMINI_RL_GENERATE_RPM` / `_TPM` / `_RPD`. Observed free-tier limits
+with `LLM_RL_GENERATE_RPM` / `_TPM` / `_RPD`. Observed free-tier limits
 (Sept 2026, will drift):
 
 | model | ~requests/min | ~requests/day |
@@ -187,7 +187,7 @@ integrate a paid filings feed; deliberately out of scope for v1.
 ## Known TODOs
 
 - ~~Gemini call rate-limiting for agent orchestration~~ — **done.** `_gemini_json`
-  now clears `shared/gemini_rate_limiter.py` (a cross-process SQLite limiter)
+  now clears `shared/llm_rate_limiter.py` (a cross-process SQLite limiter)
   before every attempt, so concurrent agents + filings-rag ingestion coordinate
   against one account-wide quota. See `shared/README.md`.
 - **`_KNOWN_NAMES` / `_KNOWN_ALIASES` cover ~13 tickers.** Extend both as the
