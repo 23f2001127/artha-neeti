@@ -8,3 +8,6 @@ data/filings/*.pdf
 .llm_rate_limiter.db
 .llm_rate_limiter.db-wal
 .llm_rate_limiter.db-shm
+
+# daily ingestion logs (see scripts/daily_ingest.ps1)
+logs/

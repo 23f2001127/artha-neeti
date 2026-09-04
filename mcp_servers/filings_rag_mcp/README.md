@@ -126,6 +126,46 @@ with its ticker; retrieval filters on it — no cross-company bleed is possible.
   group, never the whole run. On an `EmbeddingQuotaError` the run stops and prints
   a resume hint; just run the command again.
 
+### Automated daily resume (Windows Task Scheduler)
+
+Because the free tier is a ~4–5 day job, a scheduled task runs the resume once a
+day so the remaining filings finish without anyone remembering to.
+
+| | |
+|---|---|
+| **Wrapper** | `scripts/daily_ingest.ps1` — `cd`s to the repo, runs `venv\Scripts\python.exe -m mcp_servers.filings_rag_mcp.ingest`, appends stdout+stderr to `logs/ingest_YYYY-MM-DD.log`, and translates the exit code (0 = corpus complete, 2 = hit the daily quota wall = normal, else = real error). `logs/` is gitignored. |
+| **Task name** | `ArthaNeeti-DailyFilingsIngest` (root task folder `\`) |
+| **Trigger** | Daily at **12:45 IST**. The Gemini embedding daily quota resets at ~00:00 US-Pacific ≈ 12:30 IST, so the run lands just after the reset and gets a fresh full day's budget instead of running mid-quota. `-StartWhenAvailable` so a missed run (laptop asleep) fires when the machine wakes. |
+| **Action** | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:\SELF_PROJECTS\artha-neeti\scripts\daily_ingest.ps1"` |
+| **Runs as** | `Antareep`, "interactive only" (runs only while logged on — no stored password). |
+| **Time limit** | 2 hours (a day's budget embeds in well under that). |
+
+Inspect / adjust / disable:
+
+```powershell
+schtasks /query /tn "ArthaNeeti-DailyFilingsIngest" /v /fo LIST     # status + next run
+Get-ScheduledTaskInfo -TaskName "ArthaNeeti-DailyFilingsIngest"     # last run result
+
+# once `ingest.py --status` shows all 10 filings, turn it off:
+Disable-ScheduledTask -TaskName "ArthaNeeti-DailyFilingsIngest"
+# or remove entirely:
+Unregister-ScheduledTask -TaskName "ArthaNeeti-DailyFilingsIngest" -Confirm:$false
+```
+
+Re-register (from the repo root) with the block in `scripts/daily_ingest.ps1`'s
+header, or:
+
+```powershell
+$action  = New-ScheduledTaskAction -Execute "powershell.exe" -Argument '-NoProfile -ExecutionPolicy Bypass -File "D:\SELF_PROJECTS\artha-neeti\scripts\daily_ingest.ps1"'
+$trigger = New-ScheduledTaskTrigger -Daily -At 12:45PM
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+Register-ScheduledTask -TaskName "ArthaNeeti-DailyFilingsIngest" -Action $action -Trigger $trigger -Settings $settings -Force
+```
+
+> DST note: US-Pacific goes to UTC-8 in early Nov 2026, shifting the quota reset
+> to ~13:30 IST. Ingestion should be long finished by then; if not, bump the
+> trigger to 13:45.
+
 ### Ingestion cost / scale
 
 10 filings, **3,291 PDF pages total** → roughly **~4,200 chunks** (≈ 1.3
@@ -223,7 +263,9 @@ Cold run started 2026‑09‑03. RELIANCE and TCS completed; the free-tier
 **1,000 embeddings/day** cap was then hit and ingestion stopped cleanly
 (checkpointed). M&M and the remaining 7 filings resume on the next run after the
 quota resets — `python -m mcp_servers.filings_rag_mcp.ingest` (idempotent, skips
-what's done).
+what's done). As of 2026‑09‑04 this runs automatically once a day via a Windows
+Task Scheduler task (`ArthaNeeti-DailyFilingsIngest`, see *Automated daily resume*
+above); **disable that task once the table below is all ✅.**
 
 | ticker | pages | chunks | tabular chunks | status |
 |---|---:|---:|---:|---|
