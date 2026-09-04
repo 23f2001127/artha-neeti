@@ -104,12 +104,14 @@ class Limits:
 
 _DEFAULTS: dict[str, Limits] = {
     "embed": Limits(rpm=100, tpm=30_000, rpd=1_000),
-    # 'generate' is intentionally tight - research_mcp's primary model allows only
-    # ~5 req/min on the free tier. Callers that know they're on a bigger model
-    # should pass request_type="generate:<model>" and/or raise GEMINI_RL_GENERATE_*.
-    "generate": Limits(rpm=8, tpm=240_000, rpd=1_400),
+    # 'generate' is per-MODEL (callers pass request_type="generate:<model>"). The
+    # free tier is stingy and moved during development: gemini-3-flash-preview is
+    # now ~20 req/DAY, ~5 req/min. Defaulting tight means the limiter proactively
+    # trips the wall and the caller's model-fallback chain kicks in *before* a
+    # messy 429. Raise per family with GEMINI_RL_GENERATE_RPD etc. on a paid key.
+    "generate": Limits(rpm=6, tpm=240_000, rpd=20),
 }
-_FALLBACK = Limits(rpm=8, tpm=200_000, rpd=1_000)
+_FALLBACK = Limits(rpm=6, tpm=200_000, rpd=20)
 
 # The per-minute window. Overridable only so the test suite can run in seconds
 # instead of minutes; leave it at 60 in real use.
