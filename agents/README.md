@@ -4,6 +4,17 @@ LangGraph specialist agents. Each wraps **one** MCP server and answers questions
 in its domain. Built to run standalone now; each will become a node in the
 Planner's graph later.
 
+| agent | MCP server | file |
+|---|---|---|
+| Market Data Agent | `market-data-mcp` | `market_data_agent.py` |
+| News & Sentiment Agent | `research-mcp` | `news_sentiment_agent.py` |
+
+The shared machinery — MCP stdio client, the Groq-backed `create_react_agent`
+through `shared/llm_rate_limiter.py`, the model-fallback chain, MCP→LangChain tool
+bridging, trace extraction, and the `run_agent` driver — lives in **`agents/_base.py`**.
+An agent module is just: a server path, a system prompt, a synthesis step
+(structured-output schema + instructions), and a provenance extractor.
+
 ## Which LLM does what (a deliberate split)
 
 | layer | provider / model | why |
@@ -93,3 +104,53 @@ Tool-selection quality did not regress moving Gemini → Groq — the full
 3-pattern run used **13 Groq requests total** and passed all 12 checks. Costs
 ~3–5 Groq calls per query; the script's docstring notes the token-per-minute
 pacing.
+
+## `news_sentiment_agent.py` — News & Sentiment Agent
+
+Answers questions about recent news, market sentiment, and corporate
+announcements for an Indian-listed company by picking the right `research-mcp`
+tool(s). Same wiring as above (`_base`). The hard part isn't tool selection —
+it's that research-mcp's tools carry real caveats that a naive agent would
+smooth into false confidence. This agent's system + synthesis prompts force it
+to respect them:
+
+| research-mcp tool | the caveat | what this agent does |
+|---|---|---|
+| `get_sentiment` | dual-mode (text vs aggregate); the raw `breakdown` counts off-entity articles and is inflated | passes a **ticker** so aggregate mode runs; reports `overall.label` + **`breakdown_on_company`** over `on_company_count` as *the* number, and notes when raw `breakdown` differs. `score` is stated as "self-reported confidence, not calibrated". Matches research-mcp's own README distinction. |
+| `get_corporate_announcements` | a keyword-scoped Tavily news search, **NOT** the NSE/BSE feed; `mentions_company` / `likely_announcement` flags; group-company bleed-through | findings **lead with `likely_announcement=true`** items; any unflagged item cited is tagged `"(lower confidence: not flagged on-company / no announcement keyword)"`; the `disclaimer` (keeping the "NOT the NSE/BSE official feed" phrase) and the entity-disambiguation risk (naming the actual noise, e.g. Tech Mahindra for M&M) go into a dedicated **`caveats`** list |
+| `get_company_news` | items flagged `mentions_company=false` may be a group company / peer | noted when relied on |
+
+Output adds a top-level **`caveats: list[str]`** to the usual
+`{ticker, company, findings, summary, tools_called, provenance, raw_data,
+reasoning_trace}` — non-empty whenever a tool carried a disclaimer. `provenance`
+lifts the caveat-bearing fields (`disclaimer`, `breakdown` vs
+`breakdown_on_company`, `likely_announcement_count`, per-item flag breakdowns)
+into structured form so the Synthesis Agent gets them without re-parsing prose.
+
+```python
+from agents.news_sentiment_agent import run_sync
+result = run_sync("what's the market sentiment on TCS right now")
+```
+
+### Test
+
+```bash
+python agents/test_news_sentiment_agent.py
+```
+
+Three patterns, asserting tool choice **and** caveat fidelity (not just prose):
+
+| query | expected | caveat check |
+|---|---|---|
+| "what's the latest news on Reliance" | `search_news` / `get_company_news`, not sentiment/announcements | — |
+| "what's the market sentiment on TCS right now" | `get_sentiment` in `mode == "aggregate"` | output surfaces `breakdown_on_company` as the number; states score isn't calibrated |
+| "any recent dividend or earnings announcements from M&M" | `get_corporate_announcements` | `caveats` says "NOT the NSE/BSE feed" **and** names the group-company (Tech Mahindra) disambiguation risk; unflagged items tagged lower-confidence |
+
+Verified: in the announcements run the agent listed the 6 flagged M&M items first,
+tagged each Tech Mahindra item `"(lower confidence: ...)"`, and its summary itself
+said *"...Tech Mahindra ... a different Mahindra Group company and not on-company
+for M&M"*. The `get_company_news` payload (9 full articles) is trimmed before the
+synthesis call — the un-trimmed blob confused the smaller fallback models into an
+empty synthesis. Queries are paced ~45 s apart (`GROQ_TEST_GAP_S`) for the ~8k
+tokens/min Groq cap.
+
