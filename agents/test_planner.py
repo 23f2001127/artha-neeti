@@ -191,10 +191,21 @@ async def case4_compare() -> None:
     good = [t for t, rep in r.get("reports", {}).items() if "error" not in rep]
     check("4 built >=2 per-company reports", len(good) >= 2, f"good={good}")
     comp = r.get("comparison")
-    check("4 a comparison was produced", bool(comp), "comparison is null")
+    check("4 a comparison was produced", bool(comp), "" if comp else "comparison is null")
     if comp:
         check("4 comparison has >=2 dimensions", len(comp.get("dimensions", [])) >= 2, str(len(comp.get("dimensions", []))))
         check("4 comparison carries caveats", bool(comp.get("caveats")))
+        # quality check only when there's enough real data on both sides
+        ok_cells = sum(1 for st in r.get("specialist_status", {}).values() for v in st.values() if v == "ok")
+        cblob = _norm(comp.get("verdict", "") + " " + " ".join(d.get("assessment", "") for d in comp.get("dimensions", [])))
+        if ok_cells >= 4 and all(t in [x for x in r.get("reports", {})] for t in ("TCS", "INFY")):
+            check("4 comparison actually compares (edges / metrics, not just 'cannot compare')",
+                  any(w in cblob for w in ("edge", "higher", "lower", "stronger", "premium", "cheaper",
+                                           "roe", "p/e", "margin", "sentiment", "vs", "whereas", "both")),
+                  cblob[:160])
+        else:
+            print(f"  [info] only {ok_cells}/6 specialist cells ok - skipping comparison-quality check "
+                  f"(degraded-data run; the graph + honest 'cannot compare' verdict still verified)")
     check("4 graph path entered compare", "compare" in " ".join(r.get("graph_path", [])), str(r.get("graph_path")))
 
 

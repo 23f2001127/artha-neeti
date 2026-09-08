@@ -70,11 +70,16 @@ def flatten_exc(exc: BaseException) -> list[BaseException]:
 
 
 def estimate_tokens(messages: list) -> int:
+    """Conservative token estimate for the shared limiter. ~3 chars/token (not 4)
+    because agent prompts are JSON/schema-dense, plus a fat output allowance -
+    structured-output replies (synthesis reports, routing decisions) run
+    1-2k tokens. Under-estimating here is what lets the limiter wave through a
+    call that Groq then 429s, so this errs high on purpose."""
     chars = 0
     for m in messages:
         content = getattr(m, "content", m)
         chars += len(content if isinstance(content, str) else str(content))
-    return chars // 4 + 800  # + output allowance
+    return chars // 3 + 1200
 
 
 def is_rate_error(exc: BaseException) -> bool:
@@ -108,8 +113,14 @@ def msg_text(content: Any) -> str:
 # --------------------------------------------------------------------------- #
 class RateLimitedChatGroq(ChatGroq):
     """ChatGroq that clears shared/llm_rate_limiter before every call and rotates
-    through a model-fallback chain when a model's shared budget is spent or it
-    429s. One object, so it drops straight into create_react_agent.
+    through a model-fallback chain on a 429. One object, so it drops straight into
+    create_react_agent.
+
+    One reservation per call against a SINGLE ``"groq"`` bucket (not per model):
+    Groq's free tier rate-limits account-wide, so three per-model buckets let the
+    limiter wave through calls Groq then 429s. Model rotation stays as a cheap
+    extra retry under that one reservation - if every candidate still 429s the
+    reservation is refunded and QuotaExceededError raised.
 
     The candidate chain is stashed via object.__setattr__ (pydantic ignores names
     it doesn't declare as fields); ``model_name`` is swapped in place per attempt.
@@ -119,60 +130,56 @@ class RateLimitedChatGroq(ChatGroq):
         return list(getattr(self, "_rl_chain", None) or [self.model_name])
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        errs: list[str] = []
         original = self.model_name
-        est = estimate_tokens(messages)
-        for cand in self._candidates():
-            bucket = f"groq:{cand}"
-            try:
-                rid = rl.acquire(est, bucket, timeout=240.0)
-            except rl.QuotaExceededError:
-                errs.append(f"{cand}: shared budget spent")
-                continue
-            object.__setattr__(self, "model_name", cand)
-            try:
-                return super()._generate(messages, stop, run_manager, **kwargs)
-            except BaseException as exc:  # noqa: BLE001
-                rl.refund(rid, bucket)
-                if is_rate_error(exc):
-                    errs.append(f"{cand}: 429")
-                    continue
-                object.__setattr__(self, "model_name", original)
-                raise
-            finally:
-                object.__setattr__(self, "model_name", original)
-        raise rl.QuotaExceededError(
-            "all candidate Groq models are rate/quota limited: " + " | ".join(errs)
-        )
+        rid = rl.acquire(estimate_tokens(messages), "groq", timeout=240.0)
+        errs: list[str] = []
+        used = False
+        try:
+            for cand in self._candidates():
+                object.__setattr__(self, "model_name", cand)
+                try:
+                    out = super()._generate(messages, stop, run_manager, **kwargs)
+                    used = True
+                    return out
+                except BaseException as exc:  # noqa: BLE001
+                    if is_rate_error(exc):
+                        errs.append(f"{cand}: 429")
+                        continue
+                    raise
+            raise rl.QuotaExceededError(
+                "every candidate Groq model 429'd on one shared reservation: " + " | ".join(errs)
+            )
+        finally:
+            object.__setattr__(self, "model_name", original)
+            if not used:
+                rl.refund(rid, "groq")
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
-        errs: list[str] = []
         original = self.model_name
-        est = estimate_tokens(messages)
-        for cand in self._candidates():
-            bucket = f"groq:{cand}"
-            try:
-                rid = await asyncio.to_thread(
-                    functools.partial(rl.acquire, est, bucket, timeout=240.0)
-                )
-            except rl.QuotaExceededError:
-                errs.append(f"{cand}: shared budget spent")
-                continue
-            object.__setattr__(self, "model_name", cand)
-            try:
-                return await super()._agenerate(messages, stop, run_manager, **kwargs)
-            except BaseException as exc:  # noqa: BLE001
-                rl.refund(rid, bucket)
-                if is_rate_error(exc):
-                    errs.append(f"{cand}: 429")
-                    continue
-                object.__setattr__(self, "model_name", original)
-                raise
-            finally:
-                object.__setattr__(self, "model_name", original)
-        raise rl.QuotaExceededError(
-            "all candidate Groq models are rate/quota limited: " + " | ".join(errs)
+        rid = await asyncio.to_thread(
+            functools.partial(rl.acquire, estimate_tokens(messages), "groq", timeout=240.0)
         )
+        errs: list[str] = []
+        used = False
+        try:
+            for cand in self._candidates():
+                object.__setattr__(self, "model_name", cand)
+                try:
+                    out = await super()._agenerate(messages, stop, run_manager, **kwargs)
+                    used = True
+                    return out
+                except BaseException as exc:  # noqa: BLE001
+                    if is_rate_error(exc):
+                        errs.append(f"{cand}: 429")
+                        continue
+                    raise
+            raise rl.QuotaExceededError(
+                "every candidate Groq model 429'd on one shared reservation: " + " | ".join(errs)
+            )
+        finally:
+            object.__setattr__(self, "model_name", original)
+            if not used:
+                rl.refund(rid, "groq")
 
 
 def make_model(model_name: str = DEFAULT_MODEL) -> RateLimitedChatGroq:
