@@ -228,6 +228,38 @@ def _classify(specialist_outputs: dict | None) -> tuple[dict, dict, list[str]]:
     return ok, failed, missing
 
 
+_GEN_FAILURE_MARKERS = ("tool_use_failed", "failed to call a function", "failed_generation",
+                        "json decode", "jsondecodeerror", "validationerror", "outputparserexception")
+
+
+def _looks_like_gen_failure(exc: BaseException) -> bool:
+    t = f"{type(exc).__name__} {exc}".lower()
+    return any(m in t for m in _GEN_FAILURE_MARKERS)
+
+
+async def _invoke_structured(structured, msgs: list, attempts: int = 3) -> _SynthesisReport:
+    """A structured-output call that survives a degenerate generation. Groq's
+    gpt-oss models occasionally loop a token run until the function-call JSON is
+    malformed ('tool_use_failed'); a retry (which also rotates the model via the
+    RateLimitedChatGroq fallback chain) usually lands cleanly. On the last attempt
+    the nudge asks for a deliberately compact object."""
+    last: BaseException | None = None
+    for i in range(attempts):
+        try:
+            report = await structured.ainvoke(msgs)
+            return _SynthesisReport(**report) if isinstance(report, dict) else report
+        except BaseException as exc:  # noqa: BLE001
+            last = exc
+            if not _looks_like_gen_failure(exc) or i == attempts - 1:
+                raise
+            msgs = msgs + [_base.HumanMessage(
+                "Your previous attempt produced malformed output. Return a COMPACT, "
+                "valid object: <=6 key_claims, <=3 conflicts_flagged, <=5 "
+                "overall_caveats, short strings, no repeated keys."
+            )]
+    raise last  # unreachable
+
+
 async def _run_synthesis(model, query: str, payload: str) -> _SynthesisReport:
     structured = model.with_structured_output(_SynthesisReport)
     msgs = [
@@ -237,19 +269,14 @@ async def _run_synthesis(model, query: str, payload: str) -> _SynthesisReport:
             f"SPECIALIST OUTPUTS (JSON):\n{payload}\n\n{_INSTRUCTIONS}"
         ),
     ]
-    report = await structured.ainvoke(msgs)
-    if isinstance(report, dict):
-        report = _SynthesisReport(**report)
+    report = await _invoke_structured(structured, msgs)
 
     es = (report.executive_summary or "").strip().lower()
     if not es or any(p in es for p in ("were not provided", "no specialist", "no data was provided")):
-        msgs.append(_base.HumanMessage(
+        report = await _invoke_structured(structured, msgs + [_base.HumanMessage(
             "The SPECIALIST OUTPUTS above are real and populated. Write the report "
             "strictly from them; do not claim they are empty."
-        ))
-        report = await structured.ainvoke(msgs)
-        if isinstance(report, dict):
-            report = _SynthesisReport(**report)
+        )])
     return report
 
 

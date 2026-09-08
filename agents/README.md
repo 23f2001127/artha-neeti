@@ -1,9 +1,10 @@
 # agents/
 
-The specialist agents. The first three each wrap **one** MCP server and answer
-questions in its domain; the fourth (Synthesis) takes the other three's outputs
-and merges them. Built to run standalone now; each becomes a node in the Planner's
-graph later.
+The specialist agents plus the Planner that orchestrates them. The first three
+each wrap **one** MCP server; Synthesis merges their outputs; the **Planner**
+(`planner.py`) is a LangGraph `StateGraph` that routes a raw query to the right
+subset of specialists and runs the whole pipeline end to end. Every agent also
+runs standalone.
 
 | agent | input | file |
 |---|---|---|
@@ -11,6 +12,7 @@ graph later.
 | News & Sentiment Agent | `research-mcp` | `news_sentiment_agent.py` |
 | Filings Agent | `filings-rag-mcp` | `filings_agent.py` |
 | Synthesis Agent | the three agents' output dicts | `synthesis_agent.py` |
+| **Planner** | a raw user query | `planner.py` |
 
 The shared machinery — MCP stdio client, the Groq-backed `create_react_agent`
 through `shared/llm_rate_limiter.py`, the model-fallback chain, MCP→LangChain tool
@@ -295,4 +297,96 @@ the FY2026-vs-FY2025-26 vintage gap, and all 5 claims carried their upstream
 hedge (roe_source, "self-reported… not exhaustive", "similarity-based… single
 annual report"). Case 2 marked filings *"Not available"* and did not invent
 filings-sourced claims. Paced `SYNTH_TEST_GAP_S` (45 s) apart.
+
+## `planner.py` — the orchestrator
+
+A LangGraph `StateGraph` that turns a raw question into the full pipeline:
+
+```
+START → route → (gather → synthesize → [compare]) → finalize → END
+```
+
+```python
+from agents.planner import plan_sync
+result = plan_sync("give me a complete research view on TCS")
+```
+
+| node | what it does |
+|---|---|
+| **route** | one Groq call → which compan(ies) (resolved to NSE tickers), single vs multi, and **which of the 3 specialists each company actually needs** — selective, with a stated reason for every skip. Tickers are confirmed on yfinance (`fast_info`, existence only — the one place the Planner touches yfinance; known large-caps skip the lookup). Filings is skipped up front for any company outside the 10-report RAG corpus (`filings_agent.INGESTED_TICKERS`). |
+| **gather** | runs the selected specialists as a bounded-concurrency fan-out over the (company × specialist) matrix. Each is the existing agent via its own `run` coroutine — nothing reimplemented. A specialist that errors becomes `{"error": …}` in that cell, not a crash. |
+| **synthesize** | one `synthesis_agent.synthesize` call per company over whatever cells came back — its proven Case-2 partial handling does the rest. |
+| **compare** | multi-company only: a light Groq call over the *finished* per-company reports → `{verdict, dimensions[], caveats[]}`. |
+| **finalize** | assembles the output incl. the full routing rationale. |
+
+**Multi-company design:** per-company full pipeline (specialists + synthesis)
+**first**, then one comparison step over the finished reports. Chosen over one
+big synthesis call so the user gets a proper standalone view per company *and*
+the comparison, each company keeps its own conflict-flagging/caveats instead of
+them being blended, and `synthesis_agent` is reused unchanged. The comparison is
+its own small structured call — `synthesize`'s schema is built for one company's
+*raw* specialist output, not already-synthesised reports.
+
+**Concurrency:** `PLANNER_MAX_CONCURRENCY` bounds in-flight specialist agents.
+An explicit value wins; otherwise **2 for a single-company query** (overlaps the
+non-LLM work — MCP spawn, Tavily, embeddings) and **1 for a multi-company one** —
+that fans out to up to 6 specialist agents and 429-cascaded at 2 on the free Groq
+budget (~7.5k tokens/min shared, machine memory-tight). At 1 the fan-out
+serializes through the shared limiter and calls wait rather than fail.
+
+**Routing transparency is a first-class output**, not internal logic:
+
+```python
+{
+  "query": ..., "mode": "single" | "multi" | "none",
+  "companies": [{"name", "ticker", "resolvable", "resolution_note", "in_filings_corpus"}],
+  "routing": {
+     "specialists_selected": [...],
+     "specialists_skipped":  [{"specialist", "reason"}],   # a real reason per skip
+     "sub_queries": {ticker: {specialist: "..."}},
+     "rationale": "...",                                    # the router LLM's own paragraph
+  },
+  "routing_trace": [ "company 'X' -> X.NS: RESOLVABLE ...", "  -> X: skip filings - not one of the 10 ...", ... ],
+  "graph_path": ["route: ...", "gather: 3/3 ok ...", "synthesize: ...", "finalize"],
+  "reports": {ticker: <full synthesis report>},
+  "comparison": {...} | None,
+  "specialist_status": {ticker: {specialist: "ok" | "error: ..."}},
+}
+```
+
+### Test
+
+```bash
+python agents/test_planner.py routing   # just _route_node ×4 — ~4 Groq calls, fast, reliable
+python agents/test_planner.py 1          # one full end-to-end case (1–4)
+python agents/test_planner.py            # all four end to end (HEAVY)
+```
+
+Four query shapes, asserting the routing decision hardest:
+
+| query | expected routing |
+|---|---|
+| "what's Reliance's current stock price" | `market_data` **only**; news + filings skipped with reasons; no `compare` |
+| "give me a complete research view on TCS" | all three specialists; one TCS report |
+| "give me a full picture on State Bank of India" | SBIN resolvable but **filings skipped** — not in the corpus; report built from the 2 available, `missing_data` flags filings |
+| "compare TCS and Infosys on fundamentals, sentiment and risk profile" | `mode: multi`; per-company reports for TCS + INFY; `compare` node runs → `comparison` with ≥2 dimensions |
+
+**Test status (2026-09-08):**
+- **`routing` mode — 25/25, verified fresh.** All four routing decisions correct,
+  including the post-processing override (R3: router LLM proposed all three,
+  planner dropped filings because SBIN isn't in the corpus, reason surfaced in
+  `specialists_skipped`).
+- **Cases 1–3 end to end — verified green** in earlier full runs (real TCS report
+  with conflict-flagging + 4 caveats; SBI report built from 2 specialists with
+  filings flagged in `missing_data`).
+- **Case 4 end to end — routing verified every run; full execution is
+  free-Groq-tier-limited.** The four-case run is ~50–65 LLM calls and the shared
+  ~7.5k-tokens/min Groq budget can't sustain it in one sitting — cases fail on
+  `429` at random points. Every time, the planner **degraded correctly** (partial
+  `specialist_status`, `missing_data` populated, no crash). Run cases individually
+  in a quiet quota window for the full-execution proof.
+
+Concurrency for the multi-company case auto-drops to 1 (`_concurrency(multi=True)`);
+`_base`'s acquire timeout is 240 s so calls wait through a burst. `synthesis_agent`
+retries a degenerate structured-output generation (`tool_use_failed`).
 

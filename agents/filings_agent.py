@@ -51,8 +51,12 @@ from agents._base import DEFAULT_MODEL
 
 FILINGS_SERVER = str(_base.REPO_ROOT / "mcp_servers" / "filings_rag_mcp" / "server.py")
 
-# Only these are ingested so far (free-tier embedding quota is a ~4-5 day job).
-_INGESTED = ("RELIANCE", "TCS", "M&M", "BHARTIARTL")
+# The RAG corpus: all 10 annual reports were ingested by 2026-09-07.
+_INGESTED = (
+    "RELIANCE", "TCS", "M&M", "BHARTIARTL", "HDFCBANK",
+    "HINDUNILVR", "ICICIBANK", "INFY", "LT", "SUNPHARMA",
+)
+INGESTED_TICKERS = _INGESTED  # public: companies whose filings the RAG corpus holds
 _CHUNK_TEXT_LIMIT = 450  # chars of chunk text sent to the LLM; full text in raw_data
 _MAX_CHUNKS_TO_LLM = 4
 _RECURSION_LIMIT = 10     # ~3 tool calls max; retrieval is a one-shot per question
@@ -65,8 +69,8 @@ report, grounded in cited pages of that report, using ONLY the tools provided.
 
 TICKERS: pass a bare NSE-style symbol - RELIANCE, TCS, M&M, HDFCBANK, ICICIBANK, \
 INFY, LT, BHARTIARTL, HINDUNILVR, SUNPHARMA (strip any .NS/.BO). Resolve company \
-names yourself. Only these filings are ingested right now: {', '.join(_INGESTED)}. \
-If asked about any other company, say its filing has not been ingested yet and stop.
+names yourself. The ingested annual-report corpus is exactly: {', '.join(_INGESTED)}. \
+If asked about any other company, say its filing has not been ingested and stop.
 
 TOOL SELECTION - pick ONE tool for the question:
 - search_filing: open-ended / semantic questions about disclosures - risks, \

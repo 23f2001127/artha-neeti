@@ -125,7 +125,7 @@ class RateLimitedChatGroq(ChatGroq):
         for cand in self._candidates():
             bucket = f"groq:{cand}"
             try:
-                rid = rl.acquire(est, bucket, timeout=150.0)
+                rid = rl.acquire(est, bucket, timeout=240.0)
             except rl.QuotaExceededError:
                 errs.append(f"{cand}: shared budget spent")
                 continue
@@ -153,7 +153,7 @@ class RateLimitedChatGroq(ChatGroq):
             bucket = f"groq:{cand}"
             try:
                 rid = await asyncio.to_thread(
-                    functools.partial(rl.acquire, est, bucket, timeout=150.0)
+                    functools.partial(rl.acquire, est, bucket, timeout=240.0)
                 )
             except rl.QuotaExceededError:
                 errs.append(f"{cand}: shared budget spent")
