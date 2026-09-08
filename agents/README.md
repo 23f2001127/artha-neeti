@@ -1,24 +1,27 @@
 # agents/
 
-LangGraph specialist agents. Each wraps **one** MCP server and answers questions
-in its domain. Built to run standalone now; each will become a node in the
-Planner's graph later.
+The specialist agents. The first three each wrap **one** MCP server and answer
+questions in its domain; the fourth (Synthesis) takes the other three's outputs
+and merges them. Built to run standalone now; each becomes a node in the Planner's
+graph later.
 
-| agent | MCP server | file |
+| agent | input | file |
 |---|---|---|
 | Market Data Agent | `market-data-mcp` | `market_data_agent.py` |
 | News & Sentiment Agent | `research-mcp` | `news_sentiment_agent.py` |
 | Filings Agent | `filings-rag-mcp` | `filings_agent.py` |
+| Synthesis Agent | the three agents' output dicts | `synthesis_agent.py` |
 
 The shared machinery — MCP stdio client, the Groq-backed `create_react_agent`
 through `shared/llm_rate_limiter.py`, the model-fallback chain, MCP→LangChain tool
 bridging, trace extraction, and the `run_agent` driver — lives in **`agents/_base.py`**.
-An agent module is just: a server path, a system prompt, a synthesis step
+An MCP agent module is just: a server path, a system prompt, a synthesis step
 (structured-output schema + instructions), and a provenance extractor. Two
 opt-in `run_agent` knobs exist for heavier domains: `compact_tool_result(tool,
 payload)` shrinks what the ReAct loop sees per tool call (the full payload still
 feeds `raw_data`/provenance), and `recursion_limit` caps the tool-call budget.
-The Filings Agent uses both.
+The Filings Agent uses both. The Synthesis Agent reuses only `make_model`,
+`flatten_exc` and the structured-output pattern — not `run_agent` (see its section).
 
 ## Which LLM does what (a deliberate split)
 
@@ -216,4 +219,80 @@ hedged TCS revenue as *"approximately ₹267,021 crore (…FY2025-26, p.167)"* w
 break out "EBITDA" as a line item rather than inventing a figure, while carrying
 the single-filing `limitation`. Queries paced ~90 s apart (`GROQ_TEST_GAP_S`);
 each retrieval is one shared-quota Gemini embedding call.
+
+## `synthesis_agent.py` — Synthesis Agent
+
+The fourth agent, and the odd one out: **no MCP server, no ReAct loop.** It is
+handed the finished output dicts of the other three and reconciles them into the
+report a user actually reads.
+
+```python
+from agents.synthesis_agent import synthesize_sync
+report = synthesize_sync(query, {
+    "market_data":   market_data_agent.run_sync(...),
+    "news_sentiment": news_sentiment_agent.run_sync(...),
+    "filings":        filings_agent.run_sync(...),
+})
+```
+
+The interface — `synthesize(query, specialist_outputs: dict[str, dict])` — takes
+**already-gathered** outputs and nothing else. Deciding *what* to fetch is the
+Planner's job; Synthesis only reconciles and reports.
+
+### How much of `_base.py` applies
+
+`run_agent` is an MCP-plus-ReAct driver — subprocess, tool bridge, `create_react_agent`,
+`extract_trace`. None of that applies here. What's reused directly: `make_model`
+(the rate-limited Groq + fallback chain), `flatten_exc` + `rl.QuotaExceededError`
+classification, and the `with_structured_output(...) + one retry-guard` pattern
+every other agent's `_synthesize` already uses. So the module is `make_model` +
+one structured call + a thin driver of its own — no duplicated LLM/limiter code.
+
+### What it owns
+
+| concern | behaviour |
+|---|---|
+| **conflicting signals** | strong fundamentals vs negative sentiment, a filing risk news is/isn't echoing, a metric two specialists state differently — go into `conflicts_flagged` as `{topic, specialist_a/position_a, specialist_b/position_b, assessment}`, where `assessment` must judge *real contradiction vs different lenses* (trailing vs recent, different fiscal years, sample vs whole). Never averaged into a bland middle. |
+| **fiscal-year vintage** | market_data (yfinance, ~FY2026) and filings (one fixed AR, FY2024-25 / TCS FY2025-26) are different years — the prompt forces this into `overall_caveats` / `conflicts_flagged`, never a silent merge. |
+| **caveat carry-through** | every claim in `sources_by_claim` carries the **strongest upstream hedge** that applied to it (filings table-flattening, filings single-year, news "not the NSE/BSE feed", news "self-reported score", market_data `roe_source` / `as_of`). A hedged finding is never laundered into a confident one. |
+| **attribution** | `sources_by_claim[claim] = {sources: [...], caveat: ...}` — per claim, names the specialist(s) and a specific article/date or filing page where it rests on one. |
+| **partial input** | `_classify` → ok / failed / missing. Missing or errored specialists get an explicit `missing_data` entry and a `"Not available - …"` section even if the model forgets. `synthesize` on an empty set returns an `error`, not a fake report. |
+
+### Output
+
+```python
+{
+  "query": "...",
+  "companies": ["Tata Consultancy Services"],
+  "executive_summary": "... leads with the main tension ...",
+  "sections": {"market_data": "...", "news_sentiment": "...", "filings": "..."},
+  "conflicts_flagged": [{"topic": ..., "specialist_a": ..., "assessment": ...}],
+  "overall_caveats": [...],
+  "missing_data": [...],
+  "sources_by_claim": {"<claim>": {"sources": [...], "caveat": "..."}},
+  "specialists_used": [...], "reasoning_trace": [...], "model": "openai/gpt-oss-120b"
+}
+```
+On empty/failed input: `{"query", "error", "inputs_received"|"missing_data"}`.
+
+### Test
+
+```bash
+python agents/test_synthesis_agent.py
+```
+
+Runs all three specialists **for real** on TCS (data-complete; Indian IT is the
+case most likely to show a fundamentals-vs-sentiment split), then feeds the real
+outputs in. Case 1 = all three; Case 2 = filings dropped, reusing case 1's fetched
+outputs (partial-failure handling, no extra API calls).
+
+Verified 2026-09-08 (27/27 checks): market_data gave ROE 47.74% / P/E 16.73
+("strong fundamentals"); news_sentiment gave 9-of-10 negative articles over a
+chairman departure + AI-revenue downgrades; the report's `conflicts_flagged`
+entry assessed it *"different lenses… not a factual contradiction but a tension
+between quantitative health and qualitative sentiment"*, `overall_caveats` named
+the FY2026-vs-FY2025-26 vintage gap, and all 5 claims carried their upstream
+hedge (roe_source, "self-reported… not exhaustive", "similarity-based… single
+annual report"). Case 2 marked filings *"Not available"* and did not invent
+filings-sourced claims. Paced `SYNTH_TEST_GAP_S` (45 s) apart.
 
