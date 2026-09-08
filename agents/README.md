@@ -8,12 +8,17 @@ Planner's graph later.
 |---|---|---|
 | Market Data Agent | `market-data-mcp` | `market_data_agent.py` |
 | News & Sentiment Agent | `research-mcp` | `news_sentiment_agent.py` |
+| Filings Agent | `filings-rag-mcp` | `filings_agent.py` |
 
 The shared machinery — MCP stdio client, the Groq-backed `create_react_agent`
 through `shared/llm_rate_limiter.py`, the model-fallback chain, MCP→LangChain tool
 bridging, trace extraction, and the `run_agent` driver — lives in **`agents/_base.py`**.
 An agent module is just: a server path, a system prompt, a synthesis step
-(structured-output schema + instructions), and a provenance extractor.
+(structured-output schema + instructions), and a provenance extractor. Two
+opt-in `run_agent` knobs exist for heavier domains: `compact_tool_result(tool,
+payload)` shrinks what the ReAct loop sees per tool call (the full payload still
+feeds `raw_data`/provenance), and `recursion_limit` caps the tool-call budget.
+The Filings Agent uses both.
 
 ## Which LLM does what (a deliberate split)
 
@@ -153,4 +158,62 @@ for M&M"*. The `get_company_news` payload (9 full articles) is trimmed before th
 synthesis call — the un-trimmed blob confused the smaller fallback models into an
 empty synthesis. Queries are paced ~45 s apart (`GROQ_TEST_GAP_S`) for the ~8k
 tokens/min Groq cap.
+
+## `filings_agent.py` — Filings Agent
+
+Answers questions about what a company disclosed in its **own** annual report,
+grounded in cited pages, by picking one `filings-rag-mcp` tool. Same wiring as
+above (`_base`). The retrieval payload is large (multiple ~1,100-token chunks per
+call), so the trimming lesson from the News Agent is applied **from the start**,
+not retrofitted:
+
+- `_compact` caps the chunk list to 4 and each chunk's text to ~450 chars
+  *before* it reaches the reasoning loop **and** the synthesis call, via the
+  `compact_tool_result` hook. Full chunk text is untouched in `raw_data` for
+  citation/verification.
+- `recursion_limit=10` + a strict "make **exactly one** tool call" system prompt
+  (a 2nd call only if the 1st errored or hit the wrong section). Without this the
+  ReAct loop fired 3–5 `search_filing` calls per question with reworded queries,
+  blowing Groq's ~8k-tokens/min cap on the growing message history.
+
+Caveats it is forced to respect (matching `filings-rag-mcp`'s own README):
+
+| the caveat | what this agent does |
+|---|---|
+| **page citations are the point** | every finding drawn from the filing cites company + fiscal year + page, e.g. `(Reliance Industries, FY2024-25, p.142)`. An un-cited finding is only allowed when it states something was *not* found. |
+| **`may_contain_tabular_data`** — flagged chunk = a statement table PDF-flattened into run-on text | figures from a flagged chunk are hedged (`"approximately"`, `"as read from the flattened table on p.X"`), never restated with false precision; provenance carries a `tabular_warning` naming the exact pages |
+| **`compare_yoy_metrics` is single-filing scope** — the one report's own current + prior-year columns, not a trend across filings | the tool's `limitation` string is carried verbatim into `provenance`; a `caveats` entry keeps *"NOT a cross-filing multi-year comparison — one annual report per company"*; if the query implied wanting a trend, the summary says only this one YoY step is available |
+| **standalone vs consolidated** — `get_financial_statement_section` can return both | `statement_basis` field (`standalone` / `consolidated` / `mixed` / `n/a`) records which the cited figures are on; findings say which, or flag it as unclear from the retrieved text |
+
+Output adds `fiscal_year` and `statement_basis` to the usual
+`{ticker, company, findings, summary, caveats, tools_called, provenance,
+raw_data, reasoning_trace}`.
+
+```python
+from agents.filings_agent import run_sync
+result = run_sync("what are Reliance's key disclosed risks")
+```
+
+### Test
+
+```bash
+python agents/test_filings_agent.py
+```
+
+Three patterns against `RELIANCE` / `TCS` / `M&M` (all ingested), asserting tool
+choice **and** caveat fidelity:
+
+| query | expected tool | caveat check |
+|---|---|---|
+| "what are Reliance's key disclosed risks" | `search_filing` only | every finding cites a page; provenance carries the page list |
+| "what was TCS's revenue and profit for the year, from the income statement" | `get_financial_statement_section` (`income_statement`) | figures hedged; `standalone`/`consolidated` flagged; a caveat says search-based / table-flattened |
+| "how has M&M's EBITDA changed year over year" | `compare_yoy_metrics` | provenance carries `basis` + `limitation`; a caveat states this is **not** a cross-filing multi-year trend |
+
+Verified (per-query, 2026-09-04): Q1 produced 5 page-cited risk findings
+(`p.15`, `p.88`, `p.128`, …) with a tabular caveat naming pages 88/89/128; Q2
+hedged TCS revenue as *"approximately ₹267,021 crore (…FY2025-26, p.167)"* with
+`statement_basis: consolidated`; Q3 correctly reported that M&M's filing does not
+break out "EBITDA" as a line item rather than inventing a figure, while carrying
+the single-filing `limitation`. Queries paced ~90 s apart (`GROQ_TEST_GAP_S`);
+each retrieval is one shared-quota Gemini embedding call.
 

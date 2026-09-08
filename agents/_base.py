@@ -203,8 +203,19 @@ def result_payload(res: Any) -> Any:
         return {"_text": joined}
 
 
-async def load_mcp_tools(client: Client, call_log: list[dict]) -> list[StructuredTool]:
-    """Every MCP tool -> a LangChain StructuredTool; results appended to call_log."""
+async def load_mcp_tools(
+    client: Client,
+    call_log: list[dict],
+    to_llm: Callable[[str, Any], Any] | None = None,
+) -> list[StructuredTool]:
+    """Every MCP tool -> a LangChain StructuredTool; results appended to call_log.
+
+    ``call_log`` always keeps the FULL tool payload (that's what feeds ``raw_data``
+    and provenance). ``to_llm(tool_name, payload)``, if given, shrinks what the
+    ReAct loop actually sees in message history - use it when a tool returns bulky
+    text (RAG chunks) that would blow the reasoning model's token budget or confuse
+    the smaller fallback models. Opt-in; agents that don't pass it are unchanged.
+    """
     listing = await client.list_tools()
     tools: list[StructuredTool] = []
     for spec in listing.tools:
@@ -213,7 +224,8 @@ async def load_mcp_tools(client: Client, call_log: list[dict]) -> list[Structure
                 res = await client.call_tool(tool_name, kwargs)
                 payload = result_payload(res)
                 call_log.append({"tool": tool_name, "args": kwargs, "result": payload})
-                return json.dumps(payload, default=str)
+                shown = to_llm(tool_name, payload) if to_llm else payload
+                return json.dumps(shown, default=str)
 
             return _call
 
@@ -260,9 +272,14 @@ async def run_agent(
     synthesize: Synthesizer,
     collect_provenance: ProvenanceFn,
     model_name: str = DEFAULT_MODEL,
+    compact_tool_result: Callable[[str, Any], Any] | None = None,
+    recursion_limit: int = RECURSION_LIMIT,
 ) -> dict:
     """Connect to one MCP server, run the ReAct loop + synthesis, return the
     standard agent result dict. Agent-specific bits are the three callables/strings.
+
+    ``compact_tool_result(tool_name, payload)`` (optional): shrink what the ReAct
+    loop sees per tool call. ``raw_data`` / provenance still get the full payload.
     """
     if not query or not query.strip():
         return {"query": query, "error": "query is empty."}
@@ -271,12 +288,12 @@ async def run_agent(
     call_log: list[dict] = []
     try:
         async with Client(params) as client:
-            tools = await load_mcp_tools(client, call_log)
+            tools = await load_mcp_tools(client, call_log, to_llm=compact_tool_result)
             model = make_model(model_name)
             agent = create_react_agent(model, tools, prompt=system_prompt)
             state = await agent.ainvoke(
                 {"messages": [HumanMessage(query)]},
-                config={"recursion_limit": RECURSION_LIMIT},
+                config={"recursion_limit": recursion_limit},
             )
             synth = await synthesize(model, query, call_log)
             trace = extract_trace(state["messages"])
