@@ -128,8 +128,13 @@ with its ticker; retrieval filters on it — no cross-company bleed is possible.
 
 ### Automated daily resume (Windows Task Scheduler)
 
-Because the free tier is a ~4–5 day job, a scheduled task runs the resume once a
-day so the remaining filings finish without anyone remembering to.
+> **Now disabled** — the corpus finished ingesting 2026‑09‑07. The task
+> (`ArthaNeeti-DailyFilingsIngest`) is `Disable-ScheduledTask`'d, not removed;
+> `Enable-ScheduledTask` it if filings are ever added. Kept below as a record of
+> how the free-tier ingestion was run.
+
+Because the free tier is a ~4–5 day job, a scheduled task ran the resume once a
+day so the filings finished without anyone remembering to.
 
 | | |
 |---|---|
@@ -257,28 +262,34 @@ python mcp_servers/filings_rag_mcp/test_retrieval.py
 Needs ingestion done for at least `RELIANCE`, `TCS`, `M&M`. Makes ~1 Gemini
 embedding call per query (small: query text only).
 
-## Ingestion run
+## Ingestion run — COMPLETE
 
-Cold run started 2026‑09‑03. RELIANCE and TCS completed; the free-tier
-**1,000 embeddings/day** cap was then hit and ingestion stopped cleanly
-(checkpointed). M&M and the remaining 7 filings resume on the next run after the
-quota resets — `python -m mcp_servers.filings_rag_mcp.ingest` (idempotent, skips
-what's done). As of 2026‑09‑04 this runs automatically once a day via a Windows
-Task Scheduler task (`ArthaNeeti-DailyFilingsIngest`, see *Automated daily resume*
-above); **disable that task once the table below is all ✅.**
+Cold run started 2026‑09‑03; **all 10 filings ingested by 2026‑09‑07** over five
+daily resumes on the free tier (RELIANCE + TCS day 1, then ~2 filings/day until
+the 1,000 embeddings/day cap, `ingest.py` checkpointing and resuming each time).
+The `ArthaNeeti-DailyFilingsIngest` scheduled task did the resuming and is now
+**disabled** (`Disable-ScheduledTask`; re-enable if filings are ever added).
 
-| ticker | pages | chunks | tabular chunks | status |
+| ticker | chunks | tabular chunks | pages | status |
 |---|---:|---:|---:|---|
-| RELIANCE | 146 | 310 | 167 (54%) | ✅ ingested |
-| TCS | 360 | 381 | 224 (59%) | ✅ ingested |
-| M&M | 247 | ~470 | ~192 | ⏳ pending quota |
-| BHARTIARTL | 286 | ~483 | ~328 | ⏳ pending quota |
-| HDFCBANK | 583 | ~598 | ~153 | ⏳ pending quota |
-| HINDUNILVR, ICICIBANK, INFY, LT, SUNPHARMA | | ~1,900 combined | | ⏳ pending quota |
-| **total (projected)** | **3,291** | **~4,200** | **~45–55%** | 691 done |
+| RELIANCE | 310 | 167 (54%) | 1–146 | ✅ |
+| TCS | 381 | 224 (59%) | 1–360 | ✅ |
+| M&M | 470 | 192 (41%) | 1–249 | ✅ |
+| BHARTIARTL | 483 | 328 (68%) | 1–288 | ✅ |
+| HDFCBANK | 598 | 153 (26%) | 2–589 | ✅ |
+| HINDUNILVR | 484 | 117 (24%) | 2–468 | ✅ |
+| ICICIBANK | 351 | 124 (35%) | 2–341 | ✅ |
+| INFY | 402 | 187 (47%) | 2–368 | ✅ |
+| LT | 152 | 16 (11%) | 2–153 | ✅ |
+| SUNPHARMA | 349 | 138 (40%) | 1–325 | ✅ |
+| **total** | **3,980** | **1,646 (41%)** | | **10/10** |
+
+`ingest.py --status` for live numbers. (LT's PDF in `data/filings/` is the
+153‑page version — fewer chunks than the others by document length, not a partial
+ingest; `filing_ingestions` has all 10 rows.)
 
 Per-minute throughput observed: ~60 chunks per ~2‑minute commit group
-(≈ 25k tok/min). RELIANCE 310 chunks took ~15 min, TCS 381 took ~14 min.
+(≈ 25k tok/min). A ~350–600‑chunk filing took ~8–15 min of wall time.
 
 ## File layout
 
