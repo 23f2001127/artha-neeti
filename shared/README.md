@@ -59,19 +59,25 @@ coordinates, not just self-limits.
 |---|---|---|---|
 | `embed` (`gemini-embedding-001`) | 100 req / 30k tokens | **1,000 req** ← hard wall | filings-rag ingestion + queries |
 | `generate` (Gemini flash) | ~5 req | **~20 req** ← hard wall | research-mcp sentiment |
-| `groq` (`openai/gpt-oss-120b`, …) | ~27 req / **~7.5k tokens** ← binds | ~950 req | the agents' reasoning |
+| `groq` (`openai/gpt-oss-120b`, …) | ~27 req / **~7.5k tokens** ← binds | ~950 req **+ ~350k tokens/day** ← estimated wall | the agents' reasoning |
 
 - **Each text in an `embed_content` batch is one request** against both caps
   (a 90-text batch spends 90). Pass `count=90`.
-- The bucket is the **model** (`request_type="groq:<model>"` /
-  `"generate:<model>"`), so each model in a caller's fallback chain gets its own
-  window — the chain multiplies effective headroom.
-- `groq`'s binding limit is tokens/minute, so the limiter paces agent calls by
-  token spend, not just count — a multi-tool agent query can take a minute or two.
+- Buckets: Gemini is per **model** (`request_type="generate:<model>"`) so a
+  fallback chain gets a window per model. **Groq is one shared `"groq"` bucket**
+  across the whole model chain — its free tier rate-limits account-wide, so
+  per-model windows just let calls through that Groq then 429s.
+- `groq`'s per-minute binding limit is tokens, so the limiter paces by token
+  spend. It **also** enforces a daily-token wall (`tpd`): Groq has one that isn't
+  in its headers but 429-cascades every model after a day of heavy use while
+  req/day is barely touched. The 350k figure is an estimate (the ledger records
+  *estimated* tokens); it's tuned to trip the limiter's own clean
+  `QuotaExceededError` before Groq starts cascading. A single-company query is
+  ~60k tokens, multi-company ~100k, so it still allows several runs/day.
 
-Override any limit with env vars: `LLM_RL_<FAMILY>_RPM` / `_TPM` / `_RPD`
-(family = the part before `:`). On a **paid key**, `LLM_RL_EMBED_RPD=100000` or
-`LLM_RL_GROQ_TPM=600000` effectively removes the wall.
+Override any limit with env vars: `LLM_RL_<FAMILY>_RPM` / `_TPM` / `_RPD` / `_TPD`
+(family = the part before `:`). On a **paid key**, `LLM_RL_GROQ_TPD=0` removes the
+daily-token wall and `LLM_RL_EMBED_RPD=100000` the embed wall.
 
 DB location: `<repo>/.llm_rate_limiter.db` (gitignored), override with
 `LLM_RATE_LIMITER_DB`.
@@ -93,7 +99,8 @@ except RateLimited:            # a 429 didn't spend quota
 with rl.reserve(est_tokens, "generate:gemini-3-flash-preview"):
     resp = client.models.generate_content(...)   # auto-refunds if the block raises
 
-rl.snapshot()   # {bucket: {last_min_requests, last_min_tokens, today_requests, day_remaining, limits}}
+rl.snapshot()   # {bucket: {last_min_requests, last_min_tokens, today_requests, today_tokens,
+                #           day_remaining, day_tokens_remaining, limits}}
 rl.reset()      # wipe the ledger (tests, or "I know quota actually reset")
 ```
 

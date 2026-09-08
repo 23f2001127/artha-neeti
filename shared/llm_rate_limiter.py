@@ -107,22 +107,29 @@ class Limits:
     rpm: int  # requests per rolling 60 s
     tpm: int  # tokens per rolling 60 s
     rpd: int  # requests per reset-tz day
+    tpd: int  # tokens per reset-tz day (0 = no daily-token wall)
 
 
 _DEFAULTS: dict[str, Limits] = {
     # Gemini embeddings - each chunk is one request; 1,000/day is a genuine wall.
-    "embed": Limits(rpm=100, tpm=30_000, rpd=1_000),
+    "embed": Limits(rpm=100, tpm=30_000, rpd=1_000, tpd=0),
     # Gemini generation (research-mcp sentiment). The free tier is stingy and moved
     # during development: ~20 req/DAY, ~5 req/min per model. Defaulting tight means
     # the limiter trips the wall and the caller's model-fallback chain kicks in
     # *before* a messy 429.
-    "generate": Limits(rpm=6, tpm=240_000, rpd=20),
-    # Groq generation (the agents' reasoning). Free tier per model, from response
-    # headers: 1,000 req/day, ~8k tokens/min (a token bucket - the binding limit),
-    # ~30 req/min. Kept just under with headroom for concurrent agents.
-    "groq": Limits(rpm=27, tpm=7_500, rpd=950),
+    "generate": Limits(rpm=6, tpm=240_000, rpd=20, tpd=0),
+    # Groq generation (the agents' reasoning). Free tier, from response headers +
+    # observed behaviour: ~30 req/min, ~8k tokens/min, ~1,000 req/day - AND a
+    # daily TOKEN allowance that isn't in the headers but bites hard: a day of
+    # heavy multi-agent testing 429s *every* model in the chain while req/day is
+    # barely touched. tpd here is an ESTIMATE (Groq doesn't publish it and the
+    # ledger records estimated, not actual, tokens) tuned so the limiter trips
+    # its own clean wall before Groq starts cascading 429s. Bump it (or set 0)
+    # with LLM_RL_GROQ_TPD on a paid key. A normal single-company query is ~60k
+    # tokens, a multi-company one ~100k, so this still allows several per day.
+    "groq": Limits(rpm=27, tpm=7_500, rpd=950, tpd=350_000),
 }
-_FALLBACK = Limits(rpm=6, tpm=200_000, rpd=20)
+_FALLBACK = Limits(rpm=6, tpm=200_000, rpd=20, tpd=0)
 
 # The per-minute window. Overridable only so the test suite can run in seconds
 # instead of minutes; leave it at 60 in real use.
@@ -148,11 +155,14 @@ def _limits_for(request_type: str) -> Limits:
         if raw is None:
             return default
         try:
-            return max(1, int(raw))
+            return max(0, int(raw))
         except ValueError:
             return default
 
-    return Limits(_env("RPM", base.rpm), _env("TPM", base.tpm), _env("RPD", base.rpd))
+    return Limits(
+        _env("RPM", base.rpm), _env("TPM", base.tpm),
+        _env("RPD", base.rpd), _env("TPD", base.tpd),
+    )
 
 
 def _db_path() -> Path:
@@ -259,17 +269,25 @@ def acquire(
             conn.execute("DELETE FROM llm_events WHERE ts < ?", (now - _PRUNE_AGE,))
 
             day_start = _day_start_epoch(now)
-            day_used = conn.execute(
-                "SELECT COALESCE(SUM(requests), 0) FROM llm_events "
-                "WHERE bucket = ? AND ts >= ?",
+            day_reqs, day_tokens = conn.execute(
+                "SELECT COALESCE(SUM(requests), 0), COALESCE(SUM(tokens), 0) "
+                "FROM llm_events WHERE bucket = ? AND ts >= ?",
                 (bucket, day_start),
-            ).fetchone()[0]
-            if day_used + n > lim.rpd:
+            ).fetchone()
+            if day_reqs + n > lim.rpd:
                 _rollback(conn)
                 hrs = (_next_day_start_epoch(now) - now) / 3600.0
                 raise QuotaExceededError(
                     f"llm quota '{bucket}': daily cap {lim.rpd} would be exceeded "
-                    f"({day_used} used, +{n} requested). Resets in ~{hrs:.1f}h "
+                    f"({day_reqs} used, +{n} requested). Resets in ~{hrs:.1f}h "
+                    f"(midnight {_RESET_TZ}). Use a paid key or wait."
+                )
+            if lim.tpd and day_tokens + est > lim.tpd:
+                _rollback(conn)
+                hrs = (_next_day_start_epoch(now) - now) / 3600.0
+                raise QuotaExceededError(
+                    f"llm quota '{bucket}': daily TOKEN budget ~{lim.tpd:,} would be exceeded "
+                    f"(~{day_tokens:,} used, +{est:,} requested). Resets in ~{hrs:.1f}h "
                     f"(midnight {_RESET_TZ}). Use a paid key or wait."
                 )
 
@@ -363,15 +381,18 @@ def snapshot() -> dict:
                 (bucket, win_start),
             ).fetchone()
             d = conn.execute(
-                "SELECT COALESCE(SUM(requests),0) FROM llm_events WHERE bucket=? AND ts>=?",
+                "SELECT COALESCE(SUM(requests),0), COALESCE(SUM(tokens),0) "
+                "FROM llm_events WHERE bucket=? AND ts>=?",
                 (bucket, day_start),
-            ).fetchone()[0]
+            ).fetchone()
             out[bucket] = {
                 "last_min_requests": m[0],
                 "last_min_tokens": m[1],
-                "today_requests": d,
-                "limits": {"rpm": lim.rpm, "tpm": lim.tpm, "rpd": lim.rpd},
-                "day_remaining": max(0, lim.rpd - d),
+                "today_requests": d[0],
+                "today_tokens": d[1],
+                "limits": {"rpm": lim.rpm, "tpm": lim.tpm, "rpd": lim.rpd, "tpd": lim.tpd},
+                "day_remaining": max(0, lim.rpd - d[0]),
+                "day_tokens_remaining": (max(0, lim.tpd - d[1]) if lim.tpd else None),
             }
         conn.execute("COMMIT")
     except sqlite3.Error:
