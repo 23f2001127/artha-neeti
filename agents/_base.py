@@ -182,15 +182,16 @@ class RateLimitedChatGroq(ChatGroq):
                 rl.refund(rid, "groq")
 
 
-def make_model(model_name: str = DEFAULT_MODEL) -> RateLimitedChatGroq:
+def make_model(model_name: str = DEFAULT_MODEL, *, max_tokens: int | None = None) -> RateLimitedChatGroq:
     key = os.environ.get("GROQ_API_KEY")
     if not key:
         raise AgentError(
             "GROQ_API_KEY is not set (checked the environment and the project .env)."
         )
-    m = RateLimitedChatGroq(
-        model=model_name, temperature=0.0, max_retries=0, groq_api_key=key
-    )
+    kw = {"model": model_name, "temperature": 0.0, "max_retries": 0, "groq_api_key": key}
+    if max_tokens:  # a hard ceiling - a degenerate gpt-oss generation truncates
+        kw["max_tokens"] = max_tokens  # instead of looping a token run forever
+    m = RateLimitedChatGroq(**kw)
     object.__setattr__(m, "_rl_chain", [model_name] + [x for x in FALLBACK_MODELS if x != model_name])
     return m
 

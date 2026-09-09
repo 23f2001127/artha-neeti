@@ -110,10 +110,11 @@ main tension if there is one. Do not overstate confidence.
 market_data_section / news_sentiment_section / filings_section: 2-4 sentences \
 each, grounded in that specialist's findings. If that specialist is missing or \
 errored, set the field to "Not available - <one-line reason>".
-key_claims: the report's load-bearing claims. Each:
+key_claims: up to 6 of the report's load-bearing claims. Each:
   - claim: one sentence.
-  - sources: e.g. ["market_data"], ["filings"], ["news_sentiment", "filings"]; \
-append a specific article + date or a page number where the claim rests on one.
+  - sources: a COMMA-SEPARATED string of specialist name(s) - e.g. "market_data" \
+or "news_sentiment, filings"; append a specific article + date or a page number \
+where the claim rests on one.
   - caveat: the strongest upstream hedge on this claim, or null if genuinely \
 unhedged. Do not leave it null just because it is inconvenient.
 conflicts_flagged: one entry per genuine cross-specialist tension (topic, \
@@ -132,8 +133,11 @@ cannot cover; plus within-specialist gaps a specialist itself flagged (market_da
 # --------------------------------------------------------------------------- #
 class _Claim(BaseModel):
     claim: str = Field(description="one-sentence load-bearing claim")
-    sources: list[str] = Field(
-        description="specialist name(s); append an article+date or page number where specific"
+    # a COMMA-joined string, not a list - a list nested inside a list of objects is
+    # what tips gpt-oss into a degenerate generation. Split back to a list on output.
+    sources: str = Field(
+        description="specialist name(s), comma-separated (market_data, news_sentiment, "
+        "filings); append an article+date or page number where the claim rests on one"
     )
     caveat: str | None = Field(
         default=None, description="strongest upstream hedge on this claim, or null if genuinely unhedged"
@@ -237,7 +241,7 @@ def _looks_like_gen_failure(exc: BaseException) -> bool:
     return any(m in t for m in _GEN_FAILURE_MARKERS)
 
 
-async def _invoke_structured(structured, msgs: list, attempts: int = 3) -> _SynthesisReport:
+async def _invoke_structured(structured, msgs: list, attempts: int = 4) -> _SynthesisReport:
     """A structured-output call that survives a degenerate generation. Groq's
     gpt-oss models occasionally loop a token run until the function-call JSON is
     malformed ('tool_use_failed'); a retry (which also rotates the model via the
@@ -313,7 +317,9 @@ async def synthesize(
     }]
 
     try:
-        model = _base.make_model(model_name)
+        # max_tokens caps a degenerate generation - a gpt-oss token-run loop
+        # truncates (-> parse error -> retry) instead of running forever.
+        model = _base.make_model(model_name, max_tokens=3500)
         report = await _run_synthesis(model, query, payload)
     except BaseException as exc:  # noqa: BLE001 - unwrap anyio/limiter groups
         flat = _base.flatten_exc(exc)
@@ -341,7 +347,11 @@ async def synthesize(
             sections[key] = f"Not available - {key} agent output was not provided to synthesis."
 
     sources_by_claim = {
-        c.claim: {"sources": c.sources, "caveat": c.caveat} for c in report.key_claims
+        c.claim: {
+            "sources": [s.strip() for s in (c.sources or "").split(",") if s.strip()],
+            "caveat": c.caveat,
+        }
+        for c in report.key_claims
     }
 
     missing_data = list(report.missing_data or [])
