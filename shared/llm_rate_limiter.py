@@ -118,16 +118,18 @@ _DEFAULTS: dict[str, Limits] = {
     # the limiter trips the wall and the caller's model-fallback chain kicks in
     # *before* a messy 429.
     "generate": Limits(rpm=6, tpm=240_000, rpd=20, tpd=0),
-    # Groq generation (the agents' reasoning). Free tier, from response headers +
-    # observed behaviour: ~30 req/min, ~8k tokens/min, ~1,000 req/day - AND a
-    # daily TOKEN allowance that isn't in the headers but bites hard: a day of
-    # heavy multi-agent testing 429s *every* model in the chain while req/day is
-    # barely touched. tpd here is an ESTIMATE (Groq doesn't publish it and the
-    # ledger records estimated, not actual, tokens) tuned so the limiter trips
-    # its own clean wall before Groq starts cascading 429s. Bump it (or set 0)
-    # with LLM_RL_GROQ_TPD on a paid key. A normal single-company query is ~60k
-    # tokens, a multi-company one ~100k, so this still allows several per day.
-    "groq": Limits(rpm=27, tpm=7_500, rpd=950, tpd=350_000),
+    # Groq generation (the agents' reasoning). Free tier. The rate-limit headers
+    # advertise ~8k tokens/min, but MEASURED behaviour is lower: a 6-agent
+    # multi-company run paced to ~7.1k tok/min (per the ledger) still had Groq
+    # 429 half its calls, with req/day and a generous daily-token budget both
+    # barely touched. So tpm is set to 5k - the real sustainable rate - and the
+    # bucket is shared across the whole model chain (Groq rate-limits account-wide;
+    # per-model buckets just admit calls Groq then rejects). tpd (daily tokens) is
+    # a softer wall, an estimate, since Groq enforces one that isn't in its
+    # headers. On a paid key: LLM_RL_GROQ_TPM=... and LLM_RL_GROQ_TPD=0.
+    # Cost of the low tpm: a single-company query ~60k tokens ≈ 12 min, a
+    # multi-company one ~100k ≈ 20 min. Fine for this project; not production.
+    "groq": Limits(rpm=27, tpm=5_000, rpd=950, tpd=350_000),
 }
 _FALLBACK = Limits(rpm=6, tpm=200_000, rpd=20, tpd=0)
 

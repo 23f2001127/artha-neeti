@@ -40,7 +40,7 @@ from shared import llm_rate_limiter as rl  # noqa: E402
 REPO_ROOT = _REPO_ROOT
 
 # Groq reasoning models, primary + fallbacks. Each has its own free-tier bucket
-# (~1,000 req/day, ~8k tokens/min - the token cap binds), so the chain multiplies
+# (~950 req/day; ~5k tokens/min measured - the token cap binds), so rotation
 # headroom. llama-3.3-70b was retired on Groq; gpt-oss-120b is the current large
 # general reasoner. GROQ_AGENT_MODEL overrides the primary.
 DEFAULT_MODEL = os.environ.get("GROQ_AGENT_MODEL", "openai/gpt-oss-120b")

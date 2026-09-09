@@ -36,7 +36,7 @@ Concurrency
 -----------
 ``PLANNER_MAX_CONCURRENCY`` (default 2, read per-call) bounds in-flight specialist
 agents. Each fires 3-5 Groq calls and spawns an MCP subprocess; this project's
-Groq budget is ~7.5k tokens/min shared and the dev machine has run low on memory.
+Groq budget is ~5k tokens/min shared (measured) and the machine is memory-tight.
 2 overlaps the non-LLM work (MCP spawn, Tavily, embeddings) for a single-company
 query. A multi-company query (up to 6 specialist agents) is safest at **1** on the
 free tier - the first test run 429-cascaded at 2 - so the caller should set
@@ -69,7 +69,7 @@ def _concurrency(multi: bool = False) -> int:
     ``PLANNER_MAX_CONCURRENCY`` wins. Otherwise: 2 for a single-company query
     (overlaps MCP spawn / Tavily / embeddings), but **1** for a multi-company one -
     that fans out to up to 6 specialist agents and 429-cascaded at 2 on the free
-    Groq budget (~7.5k tokens/min shared). At 1 the fan-out serializes through the
+    Groq budget (~5k tokens/min shared, measured). At 1 the fan-out serializes through the
     shared limiter and calls wait rather than fail."""
     env = os.environ.get("PLANNER_MAX_CONCURRENCY")
     if env is not None:
