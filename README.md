@@ -45,6 +45,7 @@ flowchart TD
 
 | Layer | What | Why it's its own thing |
 |---|---|---|
+| **API** (`app/`) | FastAPI. `POST /research` creates a job and returns immediately; the Planner runs as a background task; `GET /research/{id}` is polled for live progress. Job state (routing trace, per-specialist status, final report) is persisted to Postgres as the graph advances. | A query takes 1–20+ minutes — it cannot be a blocking request. The graph exposes intermediate state through a small progress callback, so a client sees the routing decision seconds in and each specialist finish as it happens. |
 | **Planner** (`agents/planner.py`) | A LangGraph `StateGraph`: `route → gather → synthesize → [compare] → finalize`, with a typed state and conditional edges. | Orchestration is a distinct concern from any single agent. The planner decides *what to fetch*; specialists decide *how*. |
 | **Specialist agents** (`agents/*_agent.py`) | Market Data, News & Sentiment, Filings. Each is a Groq-backed ReAct agent wrapping exactly one MCP server, with a structured-output synthesis step and a provenance extractor. | Each domain has its own tools, caveats, and failure modes. A shared `_base.py` (~300 lines) holds everything that doesn't change between them. |
 | **MCP servers** (`mcp_servers/*/`) | 11 tools across 3 stdio servers. Framework-agnostic core logic, thin MCP wrapper, `{"error": "..."}` on failure (never raises), `as_of` timestamps on success. | The tool layer is reusable and independently testable. Agents connect as real MCP clients over stdio — the same way any MCP host would. |
@@ -70,7 +71,7 @@ flowchart TD
 **LLMs** — Groq (`openai/gpt-oss-120b` + fallback chain) for agent reasoning; Google Gemini (`gemini-3-flash-preview`) for sentiment classification; `gemini-embedding-001` for filings embeddings
 **Data & retrieval** — PostgreSQL + pgvector (Supabase), `psycopg2`, `pypdf`
 **External data** — yfinance (market data), Tavily (news search)
-**Backend / frontend** — FastAPI (planned), a web frontend (planned)
+**Backend** — FastAPI (job-based API — a query is submitted, runs as a background task, and is polled for live progress), Uvicorn · **Frontend** — a web UI (planned)
 **Language** — Python 3.11
 
 The Groq-for-reasoning / Gemini-for-classification-and-embeddings split is deliberate: Groq's free tier gives ~950 requests/day per model and is fast (~1s/call), which suits the 3–5 calls each agent query burns; Gemini's structured-output mode and embedding API cover what Groq doesn't offer.
@@ -88,7 +89,7 @@ The Groq-for-reasoning / Gemini-for-classification-and-embeddings split is delib
 | `shared/llm_rate_limiter.py` | ✅ built, concurrent-scenario tested |
 | Market Data · News & Sentiment · Filings · Synthesis agents | ✅ built, each with a standalone test asserting tool choice *and* caveat fidelity |
 | LangGraph Planner | ✅ built; all four routing/execution patterns verified end-to-end (single-tool, full single-company, corpus-miss graceful skip, multi-company comparison) |
-| FastAPI service layer | ⬜ not started |
+| FastAPI service layer | ✅ built — job-based API (queries take minutes), live progress via Postgres, tested |
 | Web frontend (agent-trace view, report export) | ⬜ not started |
 
 Each component has its own README with the design decisions, test evidence, and known limitations (`mcp_servers/*/README.md`, `agents/README.md`, `shared/README.md`). The agent tests are runnable scripts that print full reasoning traces and structured output, not just pass/fail.
@@ -138,11 +139,25 @@ from agents.planner import plan_sync
 report = plan_sync("compare TCS and Infosys on fundamentals and risk profile")
 ```
 
+**Run the API** (a query takes minutes, so it's job-based — submit, then poll):
+
+```bash
+uvicorn app.main:app --reload           # http://127.0.0.1:8000  ·  docs at /docs
+
+curl -X POST localhost:8000/research -H 'content-type: application/json' \
+     -d '{"query": "what is Reliance'\''s current stock price"}'
+# -> {"job_id": "...", "status": "queued"}
+
+curl localhost:8000/research/<job_id>   # status, routing_trace (early), specialist_status (live), report (when done)
+curl localhost:8000/companies           # full vs partial coverage
+```
+
 **Run any component's tests** (each is a standalone script, not pytest):
 
 ```bash
 python agents/test_planner.py routing        # routing decisions only — fast, ~4 LLM calls
 python agents/test_planner.py 2              # one full end-to-end case
+python app/test_api.py                       # the API, in-process, on a cheap job
 python agents/test_market_data_agent.py
 python mcp_servers/filings_rag_mcp/test_retrieval.py
 python shared/test_llm_rate_limiter.py
@@ -162,7 +177,7 @@ python shared/test_llm_rate_limiter.py
 - [x] Filings Agent
 - [x] Synthesis Agent — conflict flagging + per-claim provenance
 - [x] LangGraph Planner — selective routing, single-company + multi-company comparison
-- [ ] FastAPI service layer
+- [x] FastAPI service layer — job-based API, live progress persisted to Postgres
 - [ ] Web frontend — live agent-trace view, report export
 - [ ] Deployment
 
