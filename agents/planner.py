@@ -51,11 +51,12 @@ Use
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import operator
 import os
 import sys
-from typing import Annotated, TypedDict
+from typing import Annotated, Any, Callable, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
@@ -75,6 +76,32 @@ def _concurrency(multi: bool = False) -> int:
     if env is not None:
         return max(1, int(env))
     return 1 if multi else 2
+
+
+# Optional intermediate-progress hook. A caller (the FastAPI job runner) sets this
+# via plan(on_progress=...); nodes push {routing_trace, routing, specialist_status,
+# ...} fragments through it as the graph advances, so a client polling mid-run sees
+# real progress instead of silence. Best-effort - a failing callback never breaks
+# the run. A ContextVar (not a global) so concurrent plan() calls stay isolated.
+_progress_cb: contextvars.ContextVar[Callable[[dict], None] | None] = contextvars.ContextVar(
+    "planner_progress_cb", default=None
+)
+
+
+def _emit(**fields: Any) -> None:
+    cb = _progress_cb.get()
+    if cb is None:
+        return
+    try:
+        cb(fields)
+    except Exception:  # noqa: BLE001 - progress reporting must never break the graph
+        pass
+
+
+def _deep(status: dict) -> dict:
+    """Snapshot the 2-level specialist_status dict so a later mutation can't race
+    a callback that hasn't finished with it."""
+    return {t: dict(per) for t, per in status.items()}
 
 
 SPECIALISTS = ("market_data", "news_sentiment", "filings")
@@ -351,6 +378,9 @@ async def _route_node(state: PlannerState) -> dict:
         "rationale": decision.rationale,
     }
     note = f"route: {len(companies_out)} company(ies), mode={mode}, specialists={selected or 'none'}"
+    # push routing out immediately - the frontend shows the decision before the
+    # (slow) specialist phase even starts.
+    _emit(routing=routing, routing_trace=trace, companies=companies_out, mode=mode)
     return {
         "routing": routing, "companies": companies_out, "mode": mode, "plan": plan,
         "routing_trace": trace, "graph_path": [note],
@@ -369,7 +399,10 @@ async def _gather_node(state: PlannerState) -> dict:
     sem = asyncio.Semaphore(n)
 
     outputs: dict[str, dict] = {}
-    status: dict[str, dict] = {}
+    # seed every planned (company, specialist) cell as 'pending' and push it, so a
+    # polling client sees the shape up front and each cell then flips to ok/error.
+    status: dict[str, dict] = {t: {sp: "pending" for sp in per} for t, per in plan.items()}
+    _emit(specialist_status=_deep(status))
 
     async def _one(ticker: str, specialist: str, sub_query: str) -> None:
         company = names.get(ticker, ticker)
@@ -382,10 +415,11 @@ async def _gather_node(state: PlannerState) -> dict:
                 head = flat[0] if flat else exc
                 out = {"error": f"{type(head).__name__}: {head}", "query": full_q}
         outputs.setdefault(ticker, {})[specialist] = out
-        status.setdefault(ticker, {})[specialist] = (
+        status[ticker][specialist] = (
             "ok" if isinstance(out, dict) and "error" not in out
             else f"error: {str(out.get('error'))[:140]}"
         )
+        _emit(specialist_status=_deep(status))
 
     tasks = [_one(t, sp, q) for t, per in plan.items() for sp, q in per.items()]
     await asyncio.gather(*tasks)
@@ -517,11 +551,23 @@ _GRAPH = _build_graph()
 
 
 # --------------------------------------------------------------------------- #
-async def plan(query: str, *, model_name: str = DEFAULT_MODEL) -> dict:
+async def plan(
+    query: str,
+    *,
+    model_name: str = DEFAULT_MODEL,
+    on_progress: Callable[[dict], None] | None = None,
+) -> dict:
     """Route -> gather -> synthesize -> [compare] -> finalize. Returns the final
-    report dict, including the full routing rationale in ``routing_trace``."""
+    report dict, including the full routing rationale in ``routing_trace``.
+
+    ``on_progress`` (optional): a sync callback invoked with intermediate-state
+    fragments as the graph advances - ``{routing, routing_trace, companies, mode}``
+    when routing finishes, then ``{specialist_status}`` each time a specialist
+    finishes. Lets a job runner stream live progress; see ``app/jobs.py``.
+    """
     if not query or not query.strip():
         return {"query": query, "error": "query is empty."}
+    token = _progress_cb.set(on_progress) if on_progress is not None else None
     try:
         state = await _GRAPH.ainvoke(
             {"query": query.strip(), "model_name": model_name, "graph_path": [], "errors": []},
@@ -535,6 +581,9 @@ async def plan(query: str, *, model_name: str = DEFAULT_MODEL) -> dict:
             "query": query,
             "error": ("LLM quota: " if quota else "") + f"{type(head).__name__}: {head}",
         }
+    finally:
+        if token is not None:
+            _progress_cb.reset(token)
     return state.get("final") or {"query": query, "error": "planner produced no final report"}
 
 
