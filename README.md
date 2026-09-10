@@ -33,11 +33,11 @@ flowchart TD
         SY --> CM["<b>compare</b><br/>cross-company dimensions<br/>(multi-company queries only)"]
     end
 
-    G --> MDA["Market Data Agent"] --> M1[["market-data-mcp<br/>· 4 tools"]] --> YF(("yfinance"))
-    G --> NSA["News &amp; Sentiment Agent"] --> M2[["research-mcp<br/>· 4 tools"]] --> TV(("Tavily + Gemini"))
-    G --> FA["Filings Agent"] --> M3[["filings-rag-mcp<br/>· 3 tools"]] --> PG[("Postgres + pgvector<br/>3,980 chunks / 10 reports")]
+    G --> MDA["Market Data Agent"] --> M1[["market-data-mcp<br/>4 tools"]] --> YF(("yfinance"))
+    G --> NSA["News + Sentiment Agent"] --> M2[["research-mcp<br/>4 tools"]] --> TV(("Tavily + Gemini"))
+    G --> FA["Filings Agent"] --> M3[["filings-rag-mcp<br/>3 tools"]] --> PG[("Postgres + pgvector<br/>3,980 chunks / 10 reports")]
 
-    SY --> OUT["Structured research report<br/>+ routing &amp; provenance trace"]
+    SY --> OUT["Structured research report<br/>plus routing + provenance trace"]
     CM --> OUT
 ```
 
