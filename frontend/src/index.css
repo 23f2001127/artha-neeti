@@ -1,0 +1,103 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+   Design tokens. A research/fintech tool, not a SaaS demo: warm paper
+   background, a single restrained brand color (deep pine), gold used only as
+   a rare accent, and semantic colors that mean one thing each. No gradients,
+   no glassmorphism, minimal shadow.
+   ------------------------------------------------------------------------- */
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+
+  --color-bg: #f7f6f2;
+  --color-surface: #ffffff;
+  --color-surface-muted: #f1f0eb;
+  --color-surface-sunken: #ebe9e2;
+  --color-border: #e1ded4;
+  --color-border-strong: #cbc7b9;
+
+  --color-ink: #181a17;
+  --color-ink-muted: #5a5d55;
+  --color-ink-faint: #8d9086;
+
+  --color-brand: #12332c;
+  --color-brand-soft: #1f4f44;
+  --color-brand-tint: #e9efec;
+  --color-accent: #b9822f;
+  --color-accent-tint: #f8efdd;
+
+  --color-ok: #1e7a4c;
+  --color-ok-tint: #e7f4ec;
+  --color-running: #a8730a;
+  --color-running-tint: #fbf1da;
+  --color-error: #ad3b3b;
+  --color-error-tint: #f9eaea;
+  --color-skip: #6b6e66;
+  --color-skip-tint: #edece5;
+
+  --color-conflict: #a8630a;
+  --color-conflict-tint: #fcf1de;
+  --color-conflict-border: #e7bd7c;
+
+  --radius-sm: 5px;
+  --radius-md: 9px;
+  --radius-lg: 13px;
+
+  --shadow-card: 0 1px 2px rgba(24, 26, 23, 0.04), 0 1px 1px rgba(24, 26, 23, 0.03);
+}
+
+html {
+  font-family: var(--font-sans);
+  color: var(--color-ink);
+  background: var(--color-bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  margin: 0;
+}
+
+::selection {
+  background: var(--color-accent-tint);
+  color: var(--color-brand);
+}
+
+/* Tabular figures wherever numbers line up in a column or sit next to a ticker. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  letter-spacing: -0.01em;
+}
+
+/* Subtle, deliberate — a status dot that breathes while something is running,
+   not a spinner. */
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.pulse-dot {
+  animation: pulse-soft 1.6s ease-in-out infinite;
+}
+
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.fade-up {
+  animation: fade-up 0.35s ease-out both;
+}
+
+/* Thin, quiet scrollbars so dense panels don't feel like OS chrome. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-strong) transparent;
+}
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: var(--color-border-strong); border-radius: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
