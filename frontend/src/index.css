@@ -1,16 +1,73 @@
 @import "tailwindcss";
 
 /* ---------------------------------------------------------------------------
-   Design tokens. A research/fintech tool, not a SaaS demo: warm paper
-   background, a single restrained brand color (deep pine), gold used only as
-   a rare accent, and semantic colors that mean one thing each. No gradients,
-   no glassmorphism, minimal shadow.
+   Design tokens as plain runtime CSS custom properties (deliberately NOT
+   inside Tailwind's @theme — those are static build-time tokens; these need to
+   change at runtime when the theme toggles). Every utility in this app
+   references them via arbitrary-value syntax (bg-[var(--color-x)]), so
+   flipping [data-theme] on <html> re-themes the whole app with zero
+   component changes.
+
+   Dark is the default and the primary design target: a premium research
+   terminal, not a SaaS dashboard — near-black with a warm undertone, a vivid
+   emerald for interactive elements, gold reserved for the mark and rare
+   emphasis. Light is a first-class second palette, not an afterthought.
    ------------------------------------------------------------------------- */
-@theme {
+:root {
   --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
 
+  --color-bg: #0a0d0b;
+  --color-bg-elevated: #0e1210;
+  --color-surface: #121613;
+  --color-surface-muted: #171c18;
+  --color-surface-sunken: #0d100e;
+  --color-border: #232a25;
+  --color-border-strong: #37413a;
+
+  --color-ink: #edeeea;
+  --color-ink-muted: #9ba39c;
+  --color-ink-faint: #62695f;
+
+  --color-brand: #34c795;
+  --color-brand-soft: #56d6ab;
+  --color-brand-tint: rgba(52, 199, 149, 0.12);
+  --color-accent: #e8b85c;
+  --color-accent-tint: rgba(232, 184, 92, 0.12);
+
+  --color-ok: #3ed28e;
+  --color-ok-tint: rgba(62, 210, 142, 0.12);
+  --color-running: #f0b429;
+  --color-running-tint: rgba(240, 180, 41, 0.12);
+  --color-error: #f0656a;
+  --color-error-tint: rgba(240, 101, 106, 0.12);
+  --color-skip: #838a80;
+  --color-skip-tint: rgba(131, 138, 128, 0.12);
+
+  --color-conflict: #f2a65a;
+  --color-conflict-tint: rgba(242, 166, 90, 0.1);
+  --color-conflict-border: rgba(242, 166, 90, 0.32);
+
+  --color-info: #5b9bd5;
+  --color-info-tint: rgba(91, 155, 213, 0.14);
+
+  /* Deliberately constant across both themes - a tooltip is always an
+     inverted chip (dark bg, light text), never re-derived from --color-ink
+     (which flips and would go near-invisible in dark mode). */
+  --color-tooltip-bg: #16181a;
+  --color-tooltip-ink: #f3f4f2;
+
+  --radius-sm: 5px;
+  --radius-md: 9px;
+  --radius-lg: 13px;
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.24), 0 4px 16px rgba(0, 0, 0, 0.2);
+  --glow-brand: 0 0 0 1px rgba(52, 199, 149, 0.18), 0 0 24px rgba(52, 199, 149, 0.1);
+}
+
+:root[data-theme="light"] {
   --color-bg: #f7f6f2;
+  --color-bg-elevated: #fbfaf7;
   --color-surface: #ffffff;
   --color-surface-muted: #f1f0eb;
   --color-surface-sunken: #ebe9e2;
@@ -40,11 +97,11 @@
   --color-conflict-tint: #fcf1de;
   --color-conflict-border: #e7bd7c;
 
-  --radius-sm: 5px;
-  --radius-md: 9px;
-  --radius-lg: 13px;
+  --color-info: #2b5a86;
+  --color-info-tint: #eaf0f7;
 
   --shadow-card: 0 1px 2px rgba(24, 26, 23, 0.04), 0 1px 1px rgba(24, 26, 23, 0.03);
+  --glow-brand: 0 0 0 1px rgba(18, 51, 44, 0.1);
 }
 
 html {
@@ -53,18 +110,23 @@ html {
   background: var(--color-bg);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  color-scheme: dark;
+}
+html[data-theme="light"] {
+  color-scheme: light;
 }
 
 body {
   margin: 0;
+  background: var(--color-bg);
+  transition: background-color 0.25s ease;
 }
 
 ::selection {
-  background: var(--color-accent-tint);
+  background: var(--color-brand-tint);
   color: var(--color-brand);
 }
 
-/* Tabular figures wherever numbers line up in a column or sit next to a ticker. */
 .tnum {
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum" 1;
@@ -75,8 +137,6 @@ body {
   letter-spacing: -0.01em;
 }
 
-/* Subtle, deliberate — a status dot that breathes while something is running,
-   not a spinner. */
 @keyframes pulse-soft {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
@@ -93,7 +153,30 @@ body {
   animation: fade-up 0.35s ease-out both;
 }
 
-/* Thin, quiet scrollbars so dense panels don't feel like OS chrome. */
+/* Subtle animated backdrop grid for the landing hero + progress view - a
+   quiet "system is alive" texture, not a gradient blob. */
+.grid-veil {
+  background-image:
+    linear-gradient(var(--color-border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--color-border) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, black 40%, transparent 80%);
+  opacity: 0.35;
+}
+
+@keyframes dash-flow {
+  to { stroke-dashoffset: -24; }
+}
+.flow-line {
+  stroke-dasharray: 4 6;
+  animation: dash-flow 1.1s linear infinite;
+}
+
+@keyframes count-glow {
+  0%, 100% { text-shadow: 0 0 0 rgba(52, 199, 149, 0); }
+  50% { text-shadow: 0 0 18px var(--color-brand-tint); }
+}
+
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--color-border-strong) transparent;

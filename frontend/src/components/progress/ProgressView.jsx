@@ -1,4 +1,8 @@
-import { useEffect, useState } from "react";
+import { motion } from "framer-motion";
+import { useEffect, useMemo, useState } from "react";
+import AgentGraph from "../common/AgentGraph";
+import { deriveAgentGraph } from "../../lib/deriveAgentGraph";
+import { parseRoutingTrace } from "../../lib/parseRoutingTrace";
 import RoutingPanel from "./RoutingPanel";
 import SpecialistGrid from "./SpecialistGrid";
 
@@ -29,13 +33,29 @@ function phaseLabel(job) {
   return "Reconciling specialist findings into a report…";
 }
 
+const fadeUp = {
+  hidden: { opacity: 0, y: 14 },
+  show: (i = 0) => ({ opacity: 1, y: 0, transition: { duration: 0.4, ease: "easeOut", delay: i * 0.08 } }),
+};
+
 export default function ProgressView({ job, pollError, onNewQuery }) {
   const [startedAt] = useState(() => Date.now());
   const elapsed = useElapsed(startedAt);
 
+  const companyCount = useMemo(() => {
+    const fromStatus = Object.keys(job?.specialist_status || {}).length;
+    if (fromStatus) return fromStatus;
+    return parseRoutingTrace(job?.routing_trace)?.companies.length || 0;
+  }, [job?.specialist_status, job?.routing_trace]);
+
+  const graph = useMemo(
+    () => (companyCount <= 1 ? deriveAgentGraph(job?.routing_trace, job?.specialist_status) : null),
+    [companyCount, job?.routing_trace, job?.specialist_status],
+  );
+
   return (
     <div className="mx-auto max-w-[860px] px-6 pt-10 pb-20">
-      <div className="flex items-start justify-between gap-4 mb-6 fade-up">
+      <motion.div variants={fadeUp} initial="hidden" animate="show" custom={0} className="flex items-start justify-between gap-4 mb-6">
         <div>
           <p className="text-[11px] uppercase tracking-wide text-[var(--color-ink-faint)] mb-1">Research query</p>
           <h1 className="text-[19px] font-semibold text-[var(--color-ink)] leading-snug max-w-[560px]">
@@ -48,18 +68,18 @@ export default function ProgressView({ job, pollError, onNewQuery }) {
         >
           Cancel / new query
         </button>
-      </div>
+      </motion.div>
 
-      <div className="flex items-center gap-3 mb-6 fade-up">
+      <motion.div variants={fadeUp} initial="hidden" animate="show" custom={1} className="flex items-center gap-3 mb-6">
         <span className="inline-flex items-center gap-2 text-[13px] font-medium text-[var(--color-running)] bg-[var(--color-running-tint)] px-3 py-1.5 rounded-full">
           <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-running)] pulse-dot" />
           {phaseLabel(job)}
         </span>
         <span className="mono text-[12px] text-[var(--color-ink-faint)]">{fmtElapsed(elapsed)} elapsed</span>
-        <span className="text-[11.5px] text-[var(--color-ink-faint)]">
+        <span className="text-[11.5px] text-[var(--color-ink-faint)] hidden sm:inline">
           — typically a few minutes; multi-company comparisons take longer
         </span>
-      </div>
+      </motion.div>
 
       {pollError && (
         <p className="mb-4 text-[13px] text-[var(--color-error)] bg-[var(--color-error-tint)] rounded-[var(--radius-sm)] px-3 py-2">
@@ -67,10 +87,22 @@ export default function ProgressView({ job, pollError, onNewQuery }) {
         </p>
       )}
 
-      <div className="space-y-5">
+      {graph && (
+        <motion.div
+          variants={fadeUp}
+          initial="hidden"
+          animate="show"
+          custom={1.5}
+          className="rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] shadow-[var(--shadow-card)] px-6 py-5 mb-5"
+        >
+          <AgentGraph nodes={graph.nodes} plannerStatus={graph.plannerStatus} height={170} />
+        </motion.div>
+      )}
+
+      <motion.div variants={fadeUp} initial="hidden" animate="show" custom={2} className="space-y-5">
         <RoutingPanel routingTrace={job?.routing_trace} />
         <SpecialistGrid specialistStatus={job?.specialist_status} />
-      </div>
+      </motion.div>
     </div>
   );
 }

@@ -35,7 +35,7 @@ export default function ReportView({ job, onNewQuery }) {
         {job.routing_trace && <RoutingPanel routingTrace={job.routing_trace} />}
         <button
           onClick={onNewQuery}
-          className="mt-6 text-[13px] font-medium px-4 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-brand)] text-white hover:bg-[var(--color-brand-soft)] transition-colors cursor-pointer"
+          className="mt-6 text-[13px] font-medium px-4 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-brand)] text-[var(--color-bg)] hover:bg-[var(--color-brand-soft)] transition-colors cursor-pointer"
         >
           Try another query
         </button>
@@ -68,7 +68,7 @@ export default function ReportView({ job, onNewQuery }) {
           <CopyLinkButton />
           <button
             onClick={onNewQuery}
-            className="text-[12px] font-medium text-white bg-[var(--color-brand)] hover:bg-[var(--color-brand-soft)] rounded-[var(--radius-sm)] px-3 py-1.5 transition-colors cursor-pointer"
+            className="text-[12px] font-medium text-[var(--color-bg)] bg-[var(--color-brand)] hover:bg-[var(--color-brand-soft)] rounded-[var(--radius-sm)] px-3 py-1.5 transition-colors cursor-pointer"
           >
             New query
           </button>

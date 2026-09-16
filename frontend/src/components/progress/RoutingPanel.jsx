@@ -16,7 +16,7 @@ function SpecialistTag({ specialist, reason, kind }) {
       {reason && (
         <div
           className="pointer-events-none absolute left-0 top-full mt-1.5 z-20 w-64 rounded-[var(--radius-sm)]
-                     border border-[var(--color-border)] bg-[var(--color-ink)] text-white text-[11.5px] leading-snug
+                     bg-[var(--color-tooltip-bg)] text-[var(--color-tooltip-ink)] text-[11.5px] leading-snug
                      px-2.5 py-2 opacity-0 group-hover:opacity-100 transition-opacity shadow-lg"
         >
           {reason}

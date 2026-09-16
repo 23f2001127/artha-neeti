@@ -1,3 +1,5 @@
+import ThemeToggle from "./ThemeToggle";
+
 export default function Header({ onLogoClick }) {
   return (
     <header className="border-b border-[var(--color-border)] bg-[var(--color-surface)]">
@@ -5,7 +7,7 @@ export default function Header({ onLogoClick }) {
         <button
           onClick={onLogoClick}
           className="flex items-center gap-3 group cursor-pointer"
-          title="Start a new query"
+          title="Back to home"
         >
           <svg width="30" height="30" viewBox="0 0 32 32" className="shrink-0">
             <rect width="32" height="32" rx="7" fill="var(--color-brand)" />
@@ -28,14 +30,17 @@ export default function Header({ onLogoClick }) {
             </div>
           </div>
         </button>
-        <a
-          href="https://github.com/23f2001127/artha-neeti"
-          target="_blank"
-          rel="noreferrer"
-          className="text-[12px] text-[var(--color-ink-muted)] hover:text-[var(--color-brand)] transition-colors"
-        >
-          Source ↗
-        </a>
+        <div className="flex items-center gap-4">
+          <a
+            href="https://github.com/23f2001127/artha-neeti"
+            target="_blank"
+            rel="noreferrer"
+            className="hidden sm:inline text-[12px] text-[var(--color-ink-muted)] hover:text-[var(--color-brand)] transition-colors"
+          >
+            Source ↗
+          </a>
+          <ThemeToggle />
+        </div>
       </div>
     </header>
   );

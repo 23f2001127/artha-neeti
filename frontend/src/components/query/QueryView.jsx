@@ -66,7 +66,7 @@ export default function QueryView({ onSubmit, submitting, submitError }) {
               type="submit"
               disabled={!query.trim() || submitting}
               className="text-[13.5px] font-medium px-4 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-brand)]
-                         text-white hover:bg-[var(--color-brand-soft)] transition-colors
+                         text-[var(--color-bg)] hover:bg-[var(--color-brand-soft)] transition-colors
                          disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
             >
               {submitting ? "Submitting…" : "Run research"}

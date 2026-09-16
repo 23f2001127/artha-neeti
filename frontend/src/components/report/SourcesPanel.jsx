@@ -3,7 +3,7 @@ import { specialistLabel } from "../progress/StatusBadge";
 
 const SOURCE_COLORS = {
   market_data: "bg-[var(--color-brand-tint)] text-[var(--color-brand)]",
-  news_sentiment: "bg-[#eaf0f7] text-[#2b5a86]",
+  news_sentiment: "bg-[var(--color-info-tint)] text-[var(--color-info)]",
   filings: "bg-[var(--color-accent-tint)] text-[var(--color-accent)]",
 };
 
