@@ -90,14 +90,26 @@ function Edge({ x1, y1, x2, y2, status }) {
  * news_sentiment / filings (status: idle|active|done|error|skipped).
  * `plannerStatus` colors the hub node the same way.
  */
+// Room reserved below the lowest node's center for its two-line label (name +
+// sub). Proportional slot positions (rather than fixed-pixel margins) keep
+// this correct at any `height` the caller passes; the 3-node case is the tight
+// one since its bottom slot sits closest to the edge.
+const LABEL_ROOM = 34;
+
 export default function AgentGraph({ nodes, plannerStatus = "idle", height = 190 }) {
   const width = 420;
+  const viewH = nodes.length >= 3 ? height + LABEL_ROOM : height;
   const hub = { x: 62, y: height / 2 };
-  const slotY = nodes.length === 1 ? [height / 2] : nodes.length === 2 ? [height * 0.32, height * 0.68] : [30, height / 2, height - 30];
+  const slotY =
+    nodes.length === 1
+      ? [height / 2]
+      : nodes.length === 2
+        ? [height * 0.28, height * 0.72]
+        : [height * 0.14, height / 2, height * 0.86];
   const nx = width - 78;
 
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-auto" role="img" aria-label="Agent pipeline status">
+    <svg viewBox={`0 0 ${width} ${viewH}`} className="w-full h-auto" role="img" aria-label="Agent pipeline status">
       {nodes.map((n, i) => (
         <Edge key={n.id} x1={hub.x + 20} y1={hub.y} x2={nx - 20} y2={slotY[i]} status={n.status} />
       ))}
