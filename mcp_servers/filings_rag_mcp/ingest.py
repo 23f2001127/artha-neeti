@@ -47,22 +47,42 @@ def _log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def _ingest_one(pdf_path: Path, group_size: int) -> dict:
+def ingest_file(
+    pdf_path: Path,
+    *,
+    ticker: str | None = None,
+    company: str | None = None,
+    fiscal_year: str | None = None,
+    group_size: int = 60,
+    progress_cb=None,
+    log=_log,
+) -> dict:
+    """Chunk + embed one PDF and record it in filing_chunks/filing_ingestions.
+
+    ``pdf_path.name`` is the identity key stored in the DB - the seeded corpus's
+    CLI run derives ticker/company/fiscal_year FROM that filename's convention
+    (see chunking.iter_pdf_chunks); an ad-hoc upload passes all three explicitly
+    instead, since its on-disk name is arbitrary (the caller is responsible for
+    giving the saved file a unique name - see app/filings.py). ``progress_cb
+    (embedded, total)``, if given, fires after every committed batch - a
+    job-status endpoint can surface it live.
+    """
     filename = pdf_path.name
-    ticker = config.ticker_from_filename(filename)
-    _log(f"parsing {filename} ({ticker}) ...")
-    chunks: list[Chunk] = list(iter_pdf_chunks(pdf_path))
+    log(f"parsing {filename} ...")
+    chunks: list[Chunk] = list(
+        iter_pdf_chunks(pdf_path, ticker=ticker, company=company, fiscal_year=fiscal_year)
+    )
     stats = chunk_stats(chunks)
     _tpm = rl._limits_for("embed").tpm
     est_min = stats["tokens"] / max(_tpm, 1)
-    _log(
+    log(
         f"  {filename}: {stats['pages']} pages -> {stats['chunks']} chunks "
         f"({stats['tabular_chunks']} flagged tabular, {stats['tokens']:,} tokens, "
         f"~{est_min:.0f} min at {_tpm:,} tok/min shared budget)"
     )
     if not chunks:
-        _log(f"  {filename}: no extractable text, skipping")
-        return {"filename": filename, "chunks": 0, "skipped": True}
+        log(f"  {filename}: no extractable text, skipping")
+        return {"filename": filename, "ticker": ticker, "chunks": 0, "skipped": True}
 
     db.delete_filing(filename)  # clean slate (handles a prior partial run)
 
@@ -77,16 +97,18 @@ def _ingest_one(pdf_path: Path, group_size: int) -> dict:
             rows = [{**vars(c), "embedding": v} for c, v in zip(group, vectors)]
             db.insert_chunk_batch(conn, rows)
             embedded += len(group)
-            _log(
+            log(
                 f"  {filename}: embedded {embedded}/{len(chunks)} "
                 f"(+{len(group)} in {time.time() - t0:.1f}s)"
             )
+            if progress_cb:
+                progress_cb(embedded, len(chunks))
 
         meta = {
             "filename": filename,
-            "ticker": ticker,
-            "company": config.company_name(ticker),
-            "fiscal_year": config.fiscal_year_from_filename(filename),
+            "ticker": chunks[0].ticker,
+            "company": chunks[0].company,
+            "fiscal_year": chunks[0].fiscal_year,
             "pages": stats["pages"],
             "chunks": stats["chunks"],
             "tabular_chunks": stats["tabular_chunks"],
@@ -94,8 +116,12 @@ def _ingest_one(pdf_path: Path, group_size: int) -> dict:
             "embed_dim": config.EMBED_DIM,
         }
         db.record_ingestion(conn, meta)
-    _log(f"  {filename}: DONE ({embedded} chunks)")
-    return {"filename": filename, "chunks": embedded, "skipped": False}
+    log(f"  {filename}: DONE ({embedded} chunks)")
+    return {"filename": filename, "ticker": chunks[0].ticker, "chunks": embedded, "skipped": False}
+
+
+def _ingest_one(pdf_path: Path, group_size: int) -> dict:
+    return ingest_file(pdf_path, group_size=group_size)
 
 
 def run(only: list[str] | None, force: bool, group_size: int) -> int:

@@ -123,11 +123,20 @@ def _split_long_page(text: str, target: int, overlap: int) -> list[str]:
     return final
 
 
-def iter_pdf_chunks(pdf_path: Path) -> Iterator[Chunk]:
+def iter_pdf_chunks(
+    pdf_path: Path,
+    *,
+    ticker: str | None = None,
+    company: str | None = None,
+    fiscal_year: str | None = None,
+) -> Iterator[Chunk]:
+    """ticker/company/fiscal_year default to the filename convention
+    (TICKER_AR_YYYY-YY.pdf) used by the seeded corpus. An ad-hoc upload's
+    filename is arbitrary, so its caller passes these explicitly instead."""
     filename = pdf_path.name
-    ticker = config.ticker_from_filename(filename)
-    company = config.company_name(ticker)
-    fiscal_year = config.fiscal_year_from_filename(filename)
+    ticker = ticker or config.ticker_from_filename(filename)
+    company = company or config.company_name(ticker)
+    fiscal_year = fiscal_year if fiscal_year is not None else config.fiscal_year_from_filename(filename)
 
     reader = pypdf.PdfReader(str(pdf_path))
     chunk_index = 0

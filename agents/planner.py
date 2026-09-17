@@ -63,7 +63,6 @@ from pydantic import BaseModel, Field
 
 from agents import _base, filings_agent, market_data_agent, news_sentiment_agent, synthesis_agent
 from agents._base import DEFAULT_MODEL
-from agents.filings_agent import INGESTED_TICKERS
 
 def _concurrency(multi: bool = False) -> int:
     """Max in-flight specialist agents, read per-call. An explicit
@@ -298,6 +297,9 @@ async def _route_node(state: PlannerState) -> dict:
     if isinstance(decision, dict):
         decision = _RoutingDecision(**decision)
 
+    # Read fresh each route call (not a module-level import) so a filing
+    # uploaded/auto-fetched mid-session is in scope without a restart.
+    INGESTED_TICKERS = filings_agent.ingested_tickers()
     routes = {r.specialist: r for r in decision.routes if r.specialist in SPECIALISTS}
     trace: list[str] = [f"routing query: {query!r}", f"LLM rationale: {decision.rationale}"]
 

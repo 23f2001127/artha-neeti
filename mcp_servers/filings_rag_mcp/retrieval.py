@@ -79,6 +79,16 @@ def _format_hit(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _company_name(ticker: str, rows: list[dict[str, Any]]) -> str:
+    """The filing's own recorded company name (set at ingestion time - accurate
+    for an uploaded/auto-fetched company too, not just the 10 seeded ones in
+    config.COMPANY_NAMES) if we have a row to read it from, else that static
+    fallback."""
+    if rows and rows[0].get("company"):
+        return rows[0]["company"]
+    return config.company_name(ticker)
+
+
 def _ensure_ticker_available(ticker: str) -> str | None:
     try:
         available = db.available_tickers()
@@ -118,7 +128,7 @@ def search_filing(query: str, ticker: str, top_k: int = 5) -> dict:
     hits = [_format_hit(r) for r in rows]
     return {
         "ticker": ticker,
-        "company": config.company_name(ticker),
+        "company": _company_name(ticker, rows),
         "query": str(query).strip(),
         "top_k": top_k,
         "count": len(hits),
@@ -187,7 +197,7 @@ def get_financial_statement_section(ticker: str, statement_type: str) -> dict:
     pages = sorted({h["page_number"] for h in hits})
     return {
         "ticker": ticker,
-        "company": config.company_name(ticker),
+        "company": _company_name(ticker, merged),
         "statement_type": key,
         "semantic_query": semantic_query,
         "pages_returned": pages,
@@ -257,7 +267,7 @@ def compare_yoy_metrics(ticker: str, metric: str) -> dict:
 
     return {
         "ticker": ticker,
-        "company": config.company_name(ticker),
+        "company": _company_name(ticker, merged[:8]),
         "metric": metric,
         "fiscal_year": fy,
         "basis": (

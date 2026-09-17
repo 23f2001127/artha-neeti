@@ -211,3 +211,14 @@ def available_tickers() -> list[str]:
     with connect() as conn, conn.cursor() as cur:
         cur.execute(f"SELECT DISTINCT ticker FROM {config.CHUNKS_TABLE} ORDER BY ticker")
         return [r[0] for r in cur.fetchall()]
+
+
+def company_names() -> dict[str, str]:
+    """ticker -> display name for every ingested filing, seeded or uploaded -
+    the source of truth for GET /companies and the Planner's corpus check."""
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"SELECT DISTINCT ticker, company FROM {config.INGESTIONS_TABLE} "
+            f"WHERE company IS NOT NULL ORDER BY ticker"
+        )
+        return {ticker: company for ticker, company in cur.fetchall()}

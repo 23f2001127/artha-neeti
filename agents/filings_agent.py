@@ -42,35 +42,73 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from agents import _base
 from agents._base import DEFAULT_MODEL
+from mcp_servers.filings_rag_mcp import db as _filings_db
 
 FILINGS_SERVER = str(_base.REPO_ROOT / "mcp_servers" / "filings_rag_mcp" / "server.py")
 
-# The RAG corpus: all 10 annual reports were ingested by 2026-09-07.
-_INGESTED = (
+# The seeded corpus: the 10 annual reports ingested by 2026-09-07. Anything
+# uploaded or auto-fetched afterwards lands in the same filing_chunks table, so
+# `ingested_tickers()` below - not this tuple - is the actual source of truth.
+_SEEDED = (
     "RELIANCE", "TCS", "M&M", "BHARTIARTL", "HDFCBANK",
     "HINDUNILVR", "ICICIBANK", "INFY", "LT", "SUNPHARMA",
 )
-INGESTED_TICKERS = _INGESTED  # public: companies whose filings the RAG corpus holds
 _CHUNK_TEXT_LIMIT = 450  # chars of chunk text sent to the LLM; full text in raw_data
 _MAX_CHUNKS_TO_LLM = 4
 _RECURSION_LIMIT = 10     # ~3 tool calls max; retrieval is a one-shot per question
 
+# ingested_tickers() hits Postgres (~50-150ms, a remote Supabase instance) - fine
+# once per route/agent-run, not fine on every token. Cached with a short TTL so
+# a freshly uploaded filing shows up within a demo session without a restart.
+_TICKER_CACHE_TTL = 30.0
+_ticker_cache: dict[str, Any] = {"at": 0.0, "tickers": _SEEDED}
+
+
+def ingested_tickers() -> tuple[str, ...]:
+    """Companies the filings RAG corpus can currently answer for - seeded +
+    anything uploaded/auto-fetched since. Falls back to the last known-good
+    list (seeded, if nothing cached yet) if the DB is unreachable, so a
+    transient Postgres hiccup degrades to "seeded only" rather than crashing
+    routing."""
+    now = time.time()
+    if now - _ticker_cache["at"] < _TICKER_CACHE_TTL:
+        return _ticker_cache["tickers"]
+    try:
+        tickers = tuple(sorted(set(_filings_db.available_tickers()) | set(_SEEDED)))
+    except Exception:  # noqa: BLE001 - DB hiccup: keep serving the last good list
+        return _ticker_cache["tickers"]
+    _ticker_cache["at"] = now
+    _ticker_cache["tickers"] = tickers
+    return tickers
+
+
+def invalidate_ticker_cache() -> None:
+    """Force the next ingested_tickers() call to re-hit the DB - call this right
+    after an upload/auto-fetch job finishes so it's routable immediately instead
+    of waiting out the TTL."""
+    _ticker_cache["at"] = 0.0
+
 
 # --------------------------------------------------------------------------- #
-_SYSTEM_PROMPT = f"""You are the Filings Agent for ArthaNeeti. You answer questions \
+def _system_prompt() -> str:
+    """Built fresh per run (not a module-level constant) so a filing uploaded or
+    auto-fetched mid-session is immediately in scope - no process restart."""
+    corpus = ingested_tickers()
+    return f"""You are the Filings Agent for ArthaNeeti. You answer questions \
 about what a company listed on an Indian exchange disclosed in its OWN annual \
 report, grounded in cited pages of that report, using ONLY the tools provided.
 
-TICKERS: pass a bare NSE-style symbol - RELIANCE, TCS, M&M, HDFCBANK, ICICIBANK, \
-INFY, LT, BHARTIARTL, HINDUNILVR, SUNPHARMA (strip any .NS/.BO). Resolve company \
-names yourself. The ingested annual-report corpus is exactly: {', '.join(_INGESTED)}. \
-If asked about any other company, say its filing has not been ingested and stop.
+TICKERS: pass a bare NSE-style symbol, stripped of any .NS/.BO suffix. Resolve \
+company names yourself. The ingested annual-report corpus is exactly: \
+{', '.join(corpus)}. If asked about any other company, say its filing has not \
+been ingested and stop.
 
 TOOL SELECTION - pick ONE tool for the question:
 - search_filing: open-ended / semantic questions about disclosures - risks, \
@@ -325,7 +363,7 @@ async def run(query: str, *, model_name: str = DEFAULT_MODEL) -> dict:
     """Answer one question about a company's annual-report disclosures."""
     return await _base.run_agent(
         server_path=FILINGS_SERVER,
-        system_prompt=_SYSTEM_PROMPT,
+        system_prompt=_system_prompt(),
         query=query,
         synthesize=_synthesize,
         collect_provenance=_collect_provenance,

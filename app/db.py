@@ -37,10 +37,28 @@ CREATE TABLE IF NOT EXISTS research_jobs (
 );
 CREATE INDEX IF NOT EXISTS research_jobs_status_idx  ON research_jobs (status);
 CREATE INDEX IF NOT EXISTS research_jobs_created_idx ON research_jobs (created_at DESC);
+
+CREATE TABLE IF NOT EXISTS filing_upload_jobs (
+    job_id         uuid        PRIMARY KEY,
+    ticker         text        NOT NULL,
+    company        text,
+    fiscal_year    text,
+    filename       text        NOT NULL,
+    status         text        NOT NULL DEFAULT 'queued',   -- queued | running | done | error
+    chunks_done    int         NOT NULL DEFAULT 0,
+    chunks_total   int,                                     -- null until parsing finishes
+    chunks         int,                                     -- final count, set on 'done'
+    error          text,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    updated_at     timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS filing_upload_jobs_status_idx ON filing_upload_jobs (status);
 """
 
 _UPDATABLE = {"status", "routing_trace", "specialist_status", "report", "error"}
 _JSONB = {"routing_trace", "specialist_status", "report"}
+
+_UPLOAD_UPDATABLE = {"status", "chunks_done", "chunks_total", "chunks", "error"}
 
 
 class DBError(RuntimeError):
@@ -105,5 +123,40 @@ def update_job(job_id: str, **fields: Any) -> None:
 def get_job(job_id: str) -> dict | None:
     with connect() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("SELECT * FROM research_jobs WHERE job_id = %s", (job_id,))
+        row = cur.fetchone()
+    return dict(row) if row else None
+
+
+# --------------------------------------------------------------------------- #
+# filing_upload_jobs - same shape/rationale as research_jobs, for
+# POST /filings/upload (see app/filings.py)
+# --------------------------------------------------------------------------- #
+def create_upload_job(*, ticker: str, company: str | None, fiscal_year: str | None, filename: str) -> str:
+    job_id = str(uuid.uuid4())
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO filing_upload_jobs (job_id, ticker, company, fiscal_year, filename, status)
+               VALUES (%s, %s, %s, %s, %s, 'queued')""",
+            (job_id, ticker, company, fiscal_year, filename),
+        )
+        conn.commit()
+    return job_id
+
+
+def update_upload_job(job_id: str, **fields: Any) -> None:
+    fields = {k: v for k, v in fields.items() if k in _UPLOAD_UPDATABLE}
+    if not fields:
+        return
+    sets = [f"{k} = %s" for k in fields]
+    sets.append("updated_at = now()")
+    params = [*fields.values(), job_id]
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(f"UPDATE filing_upload_jobs SET {', '.join(sets)} WHERE job_id = %s", params)
+        conn.commit()
+
+
+def get_upload_job(job_id: str) -> dict | None:
+    with connect() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT * FROM filing_upload_jobs WHERE job_id = %s", (job_id,))
         row = cur.fetchone()
     return dict(row) if row else None

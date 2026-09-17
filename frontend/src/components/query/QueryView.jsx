@@ -10,6 +10,12 @@ export default function QueryView({ onSubmit, submitting, submitError }) {
   const [companiesLoading, setCompaniesLoading] = useState(true);
   const [companiesError, setCompaniesError] = useState(null);
 
+  function refreshCompanies() {
+    return getCompanies()
+      .then((data) => setCompanies(data.full_coverage?.companies || []))
+      .catch((err) => setCompaniesError(err.message));
+  }
+
   useEffect(() => {
     let cancelled = false;
     getCompanies()
@@ -103,7 +109,12 @@ export default function QueryView({ onSubmit, submitting, submitError }) {
       </div>
 
       <div className="mt-10 fade-up" style={{ animationDelay: "180ms" }}>
-        <CoverageStrip companies={companies} loading={companiesLoading} error={companiesError} />
+        <CoverageStrip
+          companies={companies}
+          loading={companiesLoading}
+          error={companiesError}
+          onUploaded={refreshCompanies}
+        />
       </div>
     </div>
   );

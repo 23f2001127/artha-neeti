@@ -1,4 +1,6 @@
-export default function CoverageStrip({ companies, loading, error }) {
+import UploadFilingPanel from "./UploadFilingPanel";
+
+export default function CoverageStrip({ companies, loading, error, onUploaded }) {
   return (
     <div className="rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
       <div className="flex items-center justify-between mb-2.5">
@@ -46,9 +48,12 @@ export default function CoverageStrip({ companies, loading, error }) {
             <p className="text-[12px] text-[var(--color-ink-muted)] leading-snug">
               <span className="font-medium text-[var(--color-ink)]">Any other NSE-listed company</span> —
               market data and news/sentiment still work; filings analysis is skipped (with a stated reason)
-              since only the ten annual reports above are ingested.
+              since only the {companies.length || "above"} annual report{companies.length === 1 ? "" : "s"} above
+              {companies.length === 1 ? " is" : " are"} ingested — upload one below to add a company.
             </p>
           </div>
+
+          <UploadFilingPanel onUploaded={onUploaded} />
         </div>
       )}
     </div>
