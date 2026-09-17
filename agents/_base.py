@@ -42,9 +42,11 @@ REPO_ROOT = _REPO_ROOT
 # Groq reasoning models, primary + fallbacks. Each has its own free-tier bucket
 # (~950 req/day; ~5k tokens/min measured - the token cap binds), so rotation
 # headroom. llama-3.3-70b was retired on Groq; gpt-oss-120b is the current large
-# general reasoner. GROQ_AGENT_MODEL overrides the primary.
+# general reasoner. gemma2-9b-it gets a much higher per-model TPM (15k vs ~8k)
+# at a smaller 8k context - a good last-inside-Groq rung for shorter steps.
+# GROQ_AGENT_MODEL overrides the primary.
 DEFAULT_MODEL = os.environ.get("GROQ_AGENT_MODEL", "openai/gpt-oss-120b")
-FALLBACK_MODELS = ("qwen/qwen3.8-27b", "openai/gpt-oss-20b")
+FALLBACK_MODELS = ("qwen/qwen3.8-27b", "openai/gpt-oss-20b", "gemma2-9b-it")
 RECURSION_LIMIT = 16
 
 
@@ -90,6 +92,14 @@ def is_rate_error(exc: BaseException) -> bool:
         or "rate_limit" in text
         or "rate limit" in text
         or "quota" in text
+        # 413 (payload too large) observed for real on Groq: a large tool-result
+        # payload pushed one call over the model's request-size ceiling. It isn't
+        # a quota problem, but the fix is the same - rotate to the next candidate
+        # rather than fail the whole agent run outright.
+        or "413" in text
+        or "payload too large" in text
+        or "request too large" in text
+        or "request_too_large" in text
     )
 
 

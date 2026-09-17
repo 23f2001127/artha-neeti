@@ -29,7 +29,7 @@ The Filings Agent uses both. The Synthesis Agent reuses only `make_model`,
 
 | layer | provider / model | why |
 |---|---|---|
-| **Agent reasoning** — ReAct tool-selection loop + result synthesis | **Groq** — `openai/gpt-oss-120b`, fallbacks `qwen/qwen3.8-27b`, `openai/gpt-oss-20b` | Each agent query burns 3–5 LLM calls, and there will be several agents. Gemini's free-tier *generate* quota is **~20 requests/day/model** — it dried up during a single afternoon of development. Groq's free tier is **~1,000 requests/day/model** (the real per-minute cap measures ~5k tokens, and the shared limiter paces for it). Fast, too: ~1 s/call. |
+| **Agent reasoning** — ReAct tool-selection loop + result synthesis | **Groq** — `openai/gpt-oss-120b`, fallbacks `qwen/qwen3.8-27b`, `openai/gpt-oss-20b`, `gemma2-9b-it` | Each agent query burns 3–5 LLM calls, and there will be several agents. Gemini's free-tier *generate* quota is **~20 requests/day/model** — it dried up during a single afternoon of development. Groq's free tier is **~1,000 requests/day/model** (the real per-minute cap measures ~5k tokens, and the shared limiter paces for it). Fast, too: ~1 s/call. |
 | **News sentiment** (`research_mcp.get_sentiment`) | **Gemini** — `gemini-3-flash-preview` chain | Structured-output classification over short text; low call volume (1–2 per `get_sentiment`). Gemini's ~20/day is tolerable here, and its structured-output mode is convenient. Not worth moving. |
 | **Filing embeddings** (`filings_rag_mcp`) | **Gemini** — `gemini-embedding-001` (768-dim) | Groq does not offer an embedding API. This has to be Gemini (or a local model, which was deliberately rejected — see that server's README). |
 
@@ -37,17 +37,22 @@ The Filings Agent uses both. The Synthesis Agent reuses only `make_model`,
 from this account's model list (Groq's lineup rotates). `openai/gpt-oss-120b` is
 the current large general reasoner; verified tool-calling works.
 
-**All three go through `shared/llm_rate_limiter.py`** — one cross-process SQLite
+**All go through `shared/llm_rate_limiter.py`** — one cross-process SQLite
 ledger. Gemini is bucketed per model; **Groq is one shared `"groq"` bucket**
-across the whole fallback chain (its free tier rate-limits account-wide). Nothing in the codebase calls a
-hosted LLM outside the limiter's awareness. Quota profiles it enforces
-(free tier, 2026-09, re-verify — these drift):
+across the whole fallback chain (its free tier rate-limits account-wide).
+Nothing in the codebase calls a hosted LLM outside the limiter's awareness.
+Quota profiles it enforces (free tier, 2026-09, re-verify — these drift):
 
 | bucket | per minute | per day |
 |---|---|---|
 | `groq` (one shared bucket) | ~27 req / **~5k tokens** (measured, binding) | ~950 req / ~350k tokens |
 | `generate:*` (Gemini) | ~5 req | **~20 req** (binding) |
 | `embed` (Gemini) | 100 req / 30k tokens | **1,000 req** (binding) |
+
+A Cerebras last-resort fallback rung was tried and dropped (2026-09-17):
+Cerebras' free tier turned out to require a card on file for this account
+(`402 Payment required` on a live test call), which fails the project's
+zero-cost rule. Nothing here depends on it.
 
 ## `market_data_agent.py` — Market Data Agent
 
@@ -63,7 +68,7 @@ human-readable summary.
 | **MCP** | Spawns `mcp_servers/market_data_mcp/server.py` as a subprocess and talks to it as an **MCP stdio client** (`mcp.client.Client` + `StdioServerParameters`). It does **not** import `market_data.py`. The Planner will connect the same way. |
 | **MCP → LangChain** | `client.list_tools()` → each MCP tool's JSON `input_schema` is handed straight to a `StructuredTool` (`langchain-core` 1.6 accepts a schema dict), whose coroutine calls `client.call_tool(...)` and returns the structured content. No hand-written pydantic models, no `langchain-mcp-adapters` (not in requirements, and it predates `mcp` 2.x). |
 | **LLM** | Groq via `langchain-groq`, subclassed as `_RateLimitedChatGroq` so **every** call (the ReAct tool-selection loop *and* the final synthesis call) first clears `shared/llm_rate_limiter.py`. |
-| **Model resilience** | The subclass runs a fallback chain (`openai/gpt-oss-120b` → `qwen/qwen3.8-27b` → `openai/gpt-oss-20b`), sharing one `"groq"` limiter bucket; on a 429 it swaps `model_name` in place and retries the next under the same reservation — transparent to `create_react_agent`. `GROQ_AGENT_MODEL` overrides the primary. |
+| **Model resilience** | The subclass runs a fallback chain (`openai/gpt-oss-120b` → `qwen/qwen3.8-27b` → `openai/gpt-oss-20b` → `gemma2-9b-it`), sharing one `"groq"` limiter bucket; on a 429 **or a 413** it swaps `model_name` in place and retries the next under the same reservation — transparent to `create_react_agent`. If every candidate 429s/413s, `QuotaExceededError` is raised. `GROQ_AGENT_MODEL` overrides the primary. |
 | **Agent graph** | `langgraph.prebuilt.create_react_agent(model, tools, prompt=...)` — the ReAct loop. A system prompt encodes the tool-selection rules ("valued vs fundamentals" → fundamentals **and** ratios; "compare X, Y, Z" → one `get_peer_comparison`, never per-peer). |
 | **Provenance** | `as_of` / `fiscal_year` / `roe_source` / `last_fiscal_year_end` / `computed` / `missing` from every tool response are lifted into a top-level `provenance` block, and the full response is kept in `raw_data`. The synthesis prompt requires findings to carry that provenance inline. The agent never silently drops it. |
 
