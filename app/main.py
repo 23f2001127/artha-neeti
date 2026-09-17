@@ -83,7 +83,8 @@ def root() -> dict:
         "docs": "/docs",
         "endpoints": [
             "POST /research", "GET /research/{job_id}", "GET /research/{job_id}/report",
-            "GET /companies", "POST /filings/upload", "GET /filings/upload/{job_id}",
+            "GET /companies", "POST /filings/upload", "POST /filings/fetch",
+            "GET /filings/jobs/{job_id}",
         ],
     }
 
@@ -165,10 +166,17 @@ def list_companies() -> dict:
                 "Any NSE-listed company that resolves on yfinance. Filings analysis "
                 "is only available for the full-coverage list above (one annual "
                 "report each), and is skipped with a reason for everything else. "
-                "Missing a company's filing? POST /filings/upload adds one."
+                "Missing a company's filing? POST /filings/upload adds one, or "
+                "POST /filings/fetch tries to find and ingest it automatically."
             ),
         },
     }
+
+
+class FetchFilingRequest(BaseModel):
+    ticker: str = Field(min_length=1, max_length=20, examples=["ITC"])
+    company: str | None = Field(None, max_length=200, examples=["ITC Limited"])
+    fiscal_year: str | None = Field(None, max_length=20, examples=["2024-25"])
 
 
 @app.post("/filings/upload", status_code=202)
@@ -181,7 +189,7 @@ async def upload_filing(
     """Ingest an ad-hoc annual-report PDF into the filings RAG corpus, so the
     Filings Agent (and Planner routing) can answer questions about a company
     outside the 10 seeded ones. Returns immediately; poll
-    GET /filings/upload/{job_id}. Same asyncio.create_task pattern as
+    GET /filings/jobs/{job_id}. Same asyncio.create_task pattern as
     POST /research, for the same reason - this can run for minutes against the
     shared embedding rate limit.
     """
@@ -194,7 +202,7 @@ async def upload_filing(
     job_id = await asyncio.to_thread(
         db.create_upload_job,
         ticker=norm_ticker, company=(company or None), fiscal_year=(fiscal_year or None),
-        filename=file.filename or "upload.pdf",
+        filename=file.filename or "upload.pdf", source="upload",
     )
     pdf_path = await asyncio.to_thread(filings.save_upload, content, job_id, norm_ticker)
     task = asyncio.create_task(
@@ -207,17 +215,50 @@ async def upload_filing(
     return {"job_id": job_id, "status": "queued", "ticker": norm_ticker}
 
 
-@app.get("/filings/upload/{job_id}")
-async def get_upload(job_id: uuid.UUID) -> dict:
+@app.post("/filings/fetch", status_code=202)
+async def fetch_filing(req: FetchFilingRequest) -> dict:
+    """Best-effort alternative to /filings/upload: search the web for the
+    company's annual-report PDF and ingest it automatically - no file needed.
+
+    This is genuinely best-effort (see mcp_servers/filings_rag_mcp/fetch.py's
+    docstring for exactly why): it only accepts a search result that is
+    itself a direct PDF link, and does not scrape HTML pages for one. A miss
+    ends the job with status='error' and a message pointing at
+    POST /filings/upload as the reliable fallback - it is not a bug, just a
+    search that didn't turn up a direct link this time.
+    """
+    try:
+        norm_ticker = filings.validate_fetch_request(req.ticker)
+    except filings.UploadError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    job_id = await asyncio.to_thread(
+        db.create_upload_job,
+        ticker=norm_ticker, company=req.company, fiscal_year=req.fiscal_year,
+        filename=f"{norm_ticker} (auto-fetch)", source="fetch",
+    )
+    task = asyncio.create_task(
+        filings.run_fetch_job(job_id, ticker=norm_ticker, company=req.company, fiscal_year=req.fiscal_year)
+    )
+    _TASKS.add(task)
+    task.add_done_callback(_TASKS.discard)
+    return {"job_id": job_id, "status": "queued", "ticker": norm_ticker}
+
+
+@app.get("/filings/jobs/{job_id}")
+async def get_filing_job(job_id: uuid.UUID) -> dict:
     row = await asyncio.to_thread(db.get_upload_job, str(job_id))
     if row is None:
-        raise HTTPException(status_code=404, detail="upload job not found")
+        raise HTTPException(status_code=404, detail="filing job not found")
     return {
         "job_id": str(row["job_id"]),
         "ticker": row["ticker"],
         "company": row["company"],
         "fiscal_year": row["fiscal_year"],
         "filename": row["filename"],
+        "source": row["source"],
+        "source_url": row["source_url"],
+        "detail": row["detail"],
         "status": row["status"],
         "chunks_done": row["chunks_done"],
         "chunks_total": row["chunks_total"],

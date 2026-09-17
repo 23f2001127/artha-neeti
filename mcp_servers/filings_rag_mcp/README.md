@@ -71,6 +71,34 @@ python -m mcp_servers.filings_rag_mcp.ingest --force    # re-ingest everything
 python -m mcp_servers.filings_rag_mcp.ingest --status   # print progress, exit
 ```
 
+### Ad-hoc filings beyond the seeded 10 (`ingest_file()`, `fetch.py`)
+
+The CLI above is the *seeded-corpus* path (10 fixed PDFs in `data/filings/`,
+ticker/company/fiscal_year derived from the `TICKER_AR_YYYY-YY.pdf` filename
+convention). `ingest_file()` is the same chunk → embed → store pipeline
+generalized for one ad-hoc PDF with explicit `ticker`/`company`/`fiscal_year`
+(an upload's filename is arbitrary) - this is what `app/filings.py` calls for
+both ways a user can add a company outside the seeded 10:
+
+- **`POST /filings/upload`** - a PDF the user already has.
+- **`POST /filings/fetch`** - best-effort auto-fetch (`fetch.py`): Tavily-search
+  for the company's annual report, keep only direct `.pdf` search hits, rank
+  them (an "annual report"/"report and accounts" title outranks a quarterly
+  result; a title/URL matching the requested fiscal year gets a bonus), then
+  **download and verify** the top few candidates before accepting one - the
+  downloaded PDF's own leading pages must actually name the company. That
+  verification step exists because ranking alone isn't enough: a same-family
+  entity with an overlapping name (e.g. a demerged "ITC Hotels Limited" report
+  surfacing for a search for "ITC") would otherwise pass as a plausible-looking
+  false positive. It checks for the company's core name immediately followed
+  by its own corporate suffix as a contiguous phrase ("itc limited"), which a
+  subsidiary's report - text like "itc hotels limited" - does not contain.
+  Deliberately does **not** scrape HTML pages for an embedded PDF link - only
+  a search result that is itself a `.pdf` URL counts as a candidate; a miss
+  ends in `FetchError` (surfaced as the job's `error`), pointing at the upload
+  path as the reliable fallback. A genuine "couldn't find/verify one" is an
+  expected outcome for an obscure or small-cap company, not a bug.
+
 ### Chunking strategy
 
 - **Parse page by page** with `pypdf`. Every chunk records `page_number` +

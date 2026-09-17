@@ -17,7 +17,8 @@ background job, and persist/expose its progress.
 | `GET /research/{job_id}/report` | Just the finished report. `409` while still `queued`/`running`. |
 | `GET /companies` | `full_coverage` — every company with an ingested filing, seeded or since uploaded (`agents.filings_agent.ingested_tickers()`, DB-backed — not a static list), answerable by all three specialists — vs `partial_coverage` — any NSE ticker that resolves on yfinance gets market data + news; filings is skipped with a reason. |
 | `POST /filings/upload` (multipart: `file`, `ticker`, `company`?, `fiscal_year`?) | Ingests an ad-hoc annual-report PDF for a company outside the seeded 10, so it's immediately in `full_coverage` and routable by the Planner. Same job pattern as `/research` — returns `{job_id}` at once; the pipeline (chunk → embed → store) is the exact one `mcp_servers/filings_rag_mcp/ingest.py`'s CLI uses, just pointed at one ad-hoc file instead of `data/filings/`. |
-| `GET /filings/upload/{job_id}` | Poll endpoint: `status`, `chunks_done`/`chunks_total` (live), `chunks` (final count), `error`. |
+| `POST /filings/fetch` `{ticker, company?, fiscal_year?}` | Best-effort alternative to upload — no file needed. Searches the web for the annual report, downloads and verifies it actually names the company, then ingests it the same way. See `mcp_servers/filings_rag_mcp/fetch.py`'s docstring for exactly how and why it can (honestly) fail to find one. |
+| `GET /filings/jobs/{job_id}` | Shared poll endpoint for both of the above: `status`, `source` (`upload`/`fetch`), `source_url` (set for a fetch), `detail` (a short current-phase string, e.g. `"searching the web for a PDF..."`), `chunks_done`/`chunks_total` (live), `chunks` (final count), `error`. |
 | `GET /` · `GET /docs` | index / OpenAPI UI |
 
 ## How live progress works
@@ -41,25 +42,39 @@ reflects reality.
 `app/db.py`, same Supabase Postgres as `filings-rag-mcp`, same `connect()`
 pattern (fresh connection per call). `research_jobs`: `job_id uuid`, `query`,
 `status`, `routing_trace jsonb`, `specialist_status jsonb`, `report jsonb`,
-`error`, `created_at`, `updated_at`. `filing_upload_jobs` (same shape, for
-`/filings/upload`): `job_id`, `ticker`, `company`, `fiscal_year`, `filename`,
+`error`, `created_at`, `updated_at`. `filing_upload_jobs` (same shape, shared by
+`/filings/upload` and `/filings/fetch`): `job_id`, `ticker`, `company`,
+`fiscal_year`, `filename`, `source` (`upload`/`fetch`), `source_url`, `detail`,
 `status`, `chunks_done`, `chunks_total`, `chunks`, `error`, timestamps. Both
-schemas are created on startup.
+schemas are created on startup (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for
+`source`/`source_url`/`detail`, so an already-existing table from before this
+feature migrates in place).
 
-## The filings upload feature (`app/filings.py`)
+## The filings upload + auto-fetch features (`app/filings.py`)
 
-Reuses `mcp_servers/filings_rag_mcp/ingest.py`'s pipeline as-is
-(`chunking.iter_pdf_chunks` → `embeddings.embed_documents` →
-`db.insert_chunk_batch`/`record_ingestion`) — that module's `ingest_file()` now
+Both ways of adding a company outside the seeded 10 share one tail
+(`_ingest_and_finish`) that reuses `mcp_servers/filings_rag_mcp/ingest.py`'s
+pipeline as-is (`chunking.iter_pdf_chunks` → `embeddings.embed_documents` →
+`db.insert_chunk_batch`/`record_ingestion`) — that module's `ingest_file()`
 takes explicit `ticker`/`company`/`fiscal_year` instead of deriving them from a
-filename convention, since an upload's filename is arbitrary. The seeded
-corpus's CLI path is unchanged (still derives from `TICKER_AR_YYYY-YY.pdf`).
+filename convention, since neither an upload's nor a fetch's filename follows
+one. The seeded corpus's CLI path is unchanged (still derives from
+`TICKER_AR_YYYY-YY.pdf`). They differ only in how the PDF bytes are obtained:
 
-The upload is saved to `data/uploads/<TICKER>_UPLOAD_<job_id>.pdf` (gitignored)
-— the job id in the name guarantees uniqueness, since `ingest_file`'s DB
-identity key is the filename. Validation (`filings.validate_upload`): PDF only,
-≤40MB, a plausible ticker shape. The blocking pipeline runs via
-`asyncio.to_thread` so it doesn't stall the event loop.
+- **Upload**: the multipart file, validated (`filings.validate_upload`: PDF
+  only, ≤40MB, a plausible ticker shape) and saved as
+  `data/uploads/<TICKER>_UPLOAD_<job_id>.pdf`.
+- **Fetch**: `mcp_servers/filings_rag_mcp/fetch.py` searches the web, ranks
+  candidates, downloads, and verifies the top few before accepting one (see
+  that module's README section for the full "why" — ranking by title/URL
+  keywords alone isn't enough to avoid a same-family false positive). The
+  winning candidate is saved as `data/uploads/<TICKER>_FETCH_<job_id>.pdf` and
+  its URL recorded on the job row (`source_url`) for transparency.
+
+Both are gitignored; the job id in the filename guarantees uniqueness, since
+`ingest_file`'s DB identity key is the filename. The blocking pipeline (and,
+for fetch, the blocking search/download) runs via `asyncio.to_thread` so it
+doesn't stall the event loop.
 
 Once ingestion finishes, `agents.filings_agent.invalidate_ticker_cache()` is
 called so the new company is routable on the very next query — the Planner's
@@ -67,10 +82,17 @@ called so the new company is routable on the very next query — the Planner's
 shouldn't have to wait that out. `GET /companies`' `full_coverage` list picks
 it up the same way.
 
-**Known gap**: an interrupted upload (daily embedding quota hit mid-file) does
-not resume — re-uploading the same file restarts it from scratch, same as the
-seeded corpus's CLI ingestion (see that module's docstring). Fine for a single
-ad-hoc file; would need incremental resume for something larger.
+**Known gaps**:
+- An interrupted ingestion (daily embedding quota hit mid-file) does not
+  resume — retrying restarts it from scratch, same as the seeded corpus's CLI
+  ingestion (see that module's docstring). Fine for a single ad-hoc file;
+  would need incremental resume for something larger.
+- Auto-fetch is genuinely best-effort. It can honestly fail to find/verify a
+  PDF for an obscure or small-cap company, or occasionally accept a
+  wrong-but-verified document if a subsidiary shares both the parent's brand
+  name *and* corporate suffix (rare — the ITC/ITC-Hotels case that motivated
+  the verification step has a different suffix pattern and is caught).
+  Upload remains the reliable path when fetch comes up empty.
 
 ## Known limitations
 

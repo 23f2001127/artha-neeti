@@ -90,7 +90,9 @@ The Groq-for-reasoning / Gemini-for-classification-and-embeddings split is delib
 | Market Data · News & Sentiment · Filings · Synthesis agents | ✅ built, each with a standalone test asserting tool choice *and* caveat fidelity |
 | LangGraph Planner | ✅ built; all four routing/execution patterns verified end-to-end (single-tool, full single-company, corpus-miss graceful skip, multi-company comparison) |
 | FastAPI service layer | ✅ built — job-based API (queries take minutes), live progress via Postgres, tested |
-| Web frontend (agent-trace view, report export) | ⬜ not started |
+| React frontend | ✅ built — landing page, live agent-trace progress view, cited report view, dark/light theme |
+| Filings beyond the seeded 10 (upload + auto-fetch) | ✅ built — `POST /filings/upload` (a PDF you have) and `POST /filings/fetch` (best-effort web search + download), both wired into Planner routing and `GET /companies` |
+| Deployment | ⬜ not started |
 
 Each component has its own README with the design decisions, test evidence, and known limitations (`mcp_servers/*/README.md`, `agents/README.md`, `shared/README.md`). The agent tests are runnable scripts that print full reasoning traces and structured output, not just pass/fail.
 
@@ -150,6 +152,12 @@ curl -X POST localhost:8000/research -H 'content-type: application/json' \
 
 curl localhost:8000/research/<job_id>   # status, routing_trace (early), specialist_status (live), report (when done)
 curl localhost:8000/companies           # full vs partial coverage
+
+# a company outside the seeded 10 - upload its annual report, or let the system try to find it
+curl -X POST localhost:8000/filings/upload -F "ticker=ITC" -F file=@itc_annual_report.pdf
+curl -X POST localhost:8000/filings/fetch -H 'content-type: application/json' \
+     -d '{"ticker": "ITC", "company": "ITC Limited", "fiscal_year": "2024-25"}'
+curl localhost:8000/filings/jobs/<job_id>   # poll either one
 ```
 
 **Run any component's tests** (each is a standalone script, not pytest):
@@ -178,7 +186,11 @@ python shared/test_llm_rate_limiter.py
 - [x] Synthesis Agent — conflict flagging + per-claim provenance
 - [x] LangGraph Planner — selective routing, single-company + multi-company comparison
 - [x] FastAPI service layer — job-based API, live progress persisted to Postgres
-- [ ] Web frontend — live agent-trace view, report export
+- [x] React frontend — landing page, live agent-trace view, cited report view
+- [x] Filings beyond the seeded 10 — manual upload and best-effort web auto-fetch
+- [ ] Follow-up conversational queries
+- [ ] Portfolio-level analysis
+- [ ] UI/branding polish pass
 - [ ] Deployment
 
 ---

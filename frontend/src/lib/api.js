@@ -76,9 +76,19 @@ export async function uploadFiling(file, { ticker, company, fiscalYear } = {}) {
   return body;
 }
 
-/** GET /filings/upload/{job_id} -> status, chunks_done/chunks_total, error */
-export function getUploadJob(jobId) {
-  return request(`/filings/upload/${jobId}`);
+/** POST /filings/fetch {ticker, company?, fiscal_year?} -> {job_id, status, ticker}
+ * Best-effort: searches the web for the annual report and ingests it - no file needed. */
+export function fetchFiling({ ticker, company, fiscalYear } = {}) {
+  return request("/filings/fetch", {
+    method: "POST",
+    body: JSON.stringify({ ticker, company: company || null, fiscal_year: fiscalYear || null }),
+  });
+}
+
+/** GET /filings/jobs/{job_id} -> status, chunks_done/chunks_total, source, source_url, detail, error.
+ * Shared poll endpoint for both /filings/upload and /filings/fetch jobs. */
+export function getFilingJob(jobId) {
+  return request(`/filings/jobs/${jobId}`);
 }
 
 export { ApiError };

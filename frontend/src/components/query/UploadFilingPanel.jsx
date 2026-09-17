@@ -1,16 +1,33 @@
 import { useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { uploadFiling, getUploadJob, ApiError } from "../../lib/api";
+import { uploadFiling, fetchFiling, getFilingJob, ApiError } from "../../lib/api";
 
 const POLL_MS = 1500;
 
+function ModeTab({ active, onClick, children }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`text-[11.5px] font-medium px-2.5 py-1 rounded-[var(--radius-sm)] transition-colors cursor-pointer ${
+        active
+          ? "bg-[var(--color-brand-tint)] text-[var(--color-brand)]"
+          : "text-[var(--color-ink-faint)] hover:text-[var(--color-ink-muted)]"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
 export default function UploadFilingPanel({ onUploaded }) {
   const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState("upload"); // "upload" | "fetch"
   const [file, setFile] = useState(null);
   const [ticker, setTicker] = useState("");
   const [company, setCompany] = useState("");
   const [fiscalYear, setFiscalYear] = useState("");
-  const [job, setJob] = useState(null); // {status, chunks_done, chunks_total, error}
+  const [job, setJob] = useState(null); // {status, chunks_done, chunks_total, detail, error}
   const [submitError, setSubmitError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const pollRef = useRef(null);
@@ -23,7 +40,7 @@ export default function UploadFilingPanel({ onUploaded }) {
   function pollJob(jobId) {
     pollRef.current = setInterval(async () => {
       try {
-        const row = await getUploadJob(jobId);
+        const row = await getFilingJob(jobId);
         setJob(row);
         if (row.status === "done" || row.status === "error") {
           stopPolling();
@@ -38,20 +55,28 @@ export default function UploadFilingPanel({ onUploaded }) {
 
   async function handleSubmit(e) {
     e.preventDefault();
-    if (!file || !ticker.trim() || submitting) return;
+    if (!ticker.trim() || submitting) return;
+    if (mode === "upload" && !file) return;
     setSubmitting(true);
     setSubmitError(null);
     setJob(null);
     try {
-      const res = await uploadFiling(file, {
-        ticker: ticker.trim(),
-        company: company.trim() || undefined,
-        fiscalYear: fiscalYear.trim() || undefined,
-      });
+      const res =
+        mode === "upload"
+          ? await uploadFiling(file, {
+              ticker: ticker.trim(),
+              company: company.trim() || undefined,
+              fiscalYear: fiscalYear.trim() || undefined,
+            })
+          : await fetchFiling({
+              ticker: ticker.trim(),
+              company: company.trim() || undefined,
+              fiscalYear: fiscalYear.trim() || undefined,
+            });
       setJob({ status: "queued", chunks_done: 0, chunks_total: null });
       pollJob(res.job_id);
     } catch (err) {
-      setSubmitError(err instanceof ApiError ? err.message : "Upload failed.");
+      setSubmitError(err instanceof ApiError ? err.message : "Request failed.");
     } finally {
       setSubmitting(false);
     }
@@ -70,6 +95,7 @@ export default function UploadFilingPanel({ onUploaded }) {
   const busy = job && (job.status === "queued" || job.status === "running");
   const progressPct =
     job?.chunks_total ? Math.round((100 * (job.chunks_done || 0)) / job.chunks_total) : busy ? 8 : 0;
+  const canSubmit = ticker.trim() && (mode === "fetch" || file) && !submitting && !busy;
 
   return (
     <div className="pt-2.5 border-t border-[var(--color-border)] mt-1">
@@ -78,7 +104,7 @@ export default function UploadFilingPanel({ onUploaded }) {
           onClick={() => setOpen(true)}
           className="text-[12px] text-[var(--color-brand)] hover:text-[var(--color-brand-soft)] underline decoration-dotted cursor-pointer"
         >
-          Don't see your company? Upload its annual report →
+          Don't see your company? Add its annual report →
         </button>
       ) : (
         <motion.form
@@ -88,7 +114,14 @@ export default function UploadFilingPanel({ onUploaded }) {
           className="space-y-2.5"
         >
           <div className="flex items-center justify-between">
-            <p className="text-[12px] font-medium text-[var(--color-ink)]">Upload an annual report (PDF)</p>
+            <div className="flex items-center gap-1">
+              <ModeTab active={mode === "upload"} onClick={() => { setMode("upload"); reset(); }}>
+                Upload a PDF
+              </ModeTab>
+              <ModeTab active={mode === "fetch"} onClick={() => { setMode("fetch"); reset(); }}>
+                Auto-fetch from the web
+              </ModeTab>
+            </div>
             <button
               type="button"
               onClick={() => {
@@ -101,15 +134,23 @@ export default function UploadFilingPanel({ onUploaded }) {
             </button>
           </div>
 
-          <input
-            type="file"
-            accept="application/pdf"
-            onChange={(e) => setFile(e.target.files?.[0] || null)}
-            disabled={submitting || busy}
-            className="block w-full text-[12px] text-[var(--color-ink-muted)] file:mr-3 file:px-3 file:py-1.5
-                       file:rounded-[var(--radius-sm)] file:border-0 file:text-[12px] file:font-medium
-                       file:bg-[var(--color-brand-tint)] file:text-[var(--color-brand)] cursor-pointer"
-          />
+          {mode === "upload" ? (
+            <input
+              type="file"
+              accept="application/pdf"
+              onChange={(e) => setFile(e.target.files?.[0] || null)}
+              disabled={submitting || busy}
+              className="block w-full text-[12px] text-[var(--color-ink-muted)] file:mr-3 file:px-3 file:py-1.5
+                         file:rounded-[var(--radius-sm)] file:border-0 file:text-[12px] file:font-medium
+                         file:bg-[var(--color-brand-tint)] file:text-[var(--color-brand)] cursor-pointer"
+            />
+          ) : (
+            <p className="text-[11.5px] text-[var(--color-ink-faint)] leading-snug">
+              Best-effort: searches the web for a directly-downloadable annual-report PDF and verifies it
+              actually mentions the company before ingesting it. A more precise company name improves the
+              odds — if it can't find one, switch to upload.
+            </p>
+          )}
 
           <div className="grid grid-cols-3 gap-2">
             <input
@@ -124,7 +165,7 @@ export default function UploadFilingPanel({ onUploaded }) {
             <input
               value={company}
               onChange={(e) => setCompany(e.target.value)}
-              placeholder="Company name (optional)"
+              placeholder={mode === "fetch" ? "Company name (e.g. ITC Limited)" : "Company name (optional)"}
               disabled={submitting || busy}
               className="col-span-1 text-[12.5px] rounded-[var(--radius-sm)] border border-[var(--color-border)]
                          bg-[var(--color-surface)] px-2.5 py-1.5 text-[var(--color-ink)]
@@ -143,17 +184,18 @@ export default function UploadFilingPanel({ onUploaded }) {
 
           <div className="flex items-center justify-between">
             <p className="text-[11px] text-[var(--color-ink-faint)]">
-              PDF only, up to 40MB. Embedding runs against a shared free-tier quota — a large report can take
-              a few minutes.
+              {mode === "upload"
+                ? "PDF only, up to 40MB. Embedding runs against a shared free-tier quota — a large report can take a few minutes."
+                : "Searches, downloads, and verifies before ingesting — can take a little longer than a direct upload."}
             </p>
             <button
               type="submit"
-              disabled={!file || !ticker.trim() || submitting || busy}
+              disabled={!canSubmit}
               className="text-[12px] font-medium px-3 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-brand)]
                          text-[var(--color-bg)] hover:bg-[var(--color-brand-soft)] transition-colors
                          disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer shrink-0 ml-3"
             >
-              {submitting ? "Uploading…" : "Ingest"}
+              {submitting ? "Starting…" : mode === "upload" ? "Ingest" : "Fetch automatically"}
             </button>
           </div>
 
@@ -171,7 +213,9 @@ export default function UploadFilingPanel({ onUploaded }) {
                   <>
                     <div className="flex items-center justify-between mb-1.5">
                       <span className="text-[12px] text-[var(--color-ink)]">
-                        {job.status === "done" ? "Ingested" : "Embedding chunks…"}
+                        {job.status === "done"
+                          ? "Ingested"
+                          : job.detail || "Embedding chunks…"}
                       </span>
                       <span className="mono text-[11px] text-[var(--color-ink-faint)]">
                         {job.status === "done"

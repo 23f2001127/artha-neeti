@@ -44,6 +44,9 @@ CREATE TABLE IF NOT EXISTS filing_upload_jobs (
     company        text,
     fiscal_year    text,
     filename       text        NOT NULL,
+    source         text        NOT NULL DEFAULT 'upload',   -- upload | fetch
+    source_url     text,                                    -- set for 'fetch': where the PDF came from
+    detail         text,                                    -- short human phase text, e.g. "searching the web..."
     status         text        NOT NULL DEFAULT 'queued',   -- queued | running | done | error
     chunks_done    int         NOT NULL DEFAULT 0,
     chunks_total   int,                                     -- null until parsing finishes
@@ -53,12 +56,17 @@ CREATE TABLE IF NOT EXISTS filing_upload_jobs (
     updated_at     timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS filing_upload_jobs_status_idx ON filing_upload_jobs (status);
+-- filing_upload_jobs predates the source/source_url/detail columns - add them
+-- for a DB that already has the table (CREATE TABLE IF NOT EXISTS is a no-op there).
+ALTER TABLE filing_upload_jobs ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'upload';
+ALTER TABLE filing_upload_jobs ADD COLUMN IF NOT EXISTS source_url text;
+ALTER TABLE filing_upload_jobs ADD COLUMN IF NOT EXISTS detail text;
 """
 
 _UPDATABLE = {"status", "routing_trace", "specialist_status", "report", "error"}
 _JSONB = {"routing_trace", "specialist_status", "report"}
 
-_UPLOAD_UPDATABLE = {"status", "chunks_done", "chunks_total", "chunks", "error"}
+_UPLOAD_UPDATABLE = {"status", "chunks_done", "chunks_total", "chunks", "error", "detail", "source_url"}
 
 
 class DBError(RuntimeError):
@@ -129,15 +137,17 @@ def get_job(job_id: str) -> dict | None:
 
 # --------------------------------------------------------------------------- #
 # filing_upload_jobs - same shape/rationale as research_jobs, for
-# POST /filings/upload (see app/filings.py)
+# POST /filings/upload and POST /filings/fetch (see app/filings.py)
 # --------------------------------------------------------------------------- #
-def create_upload_job(*, ticker: str, company: str | None, fiscal_year: str | None, filename: str) -> str:
+def create_upload_job(
+    *, ticker: str, company: str | None, fiscal_year: str | None, filename: str, source: str = "upload"
+) -> str:
     job_id = str(uuid.uuid4())
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
-            """INSERT INTO filing_upload_jobs (job_id, ticker, company, fiscal_year, filename, status)
-               VALUES (%s, %s, %s, %s, %s, 'queued')""",
-            (job_id, ticker, company, fiscal_year, filename),
+            """INSERT INTO filing_upload_jobs (job_id, ticker, company, fiscal_year, filename, source, status)
+               VALUES (%s, %s, %s, %s, %s, %s, 'queued')""",
+            (job_id, ticker, company, fiscal_year, filename, source),
         )
         conn.commit()
     return job_id

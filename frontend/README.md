@@ -33,7 +33,12 @@ no axios, no query-caching library — polling a single job doesn't need one.
   coverage strip from `GET /companies` distinguishing full coverage (all three
   specialists) from partial (market data + news only). A best-effort client-side
   check (`lib/coverage.js`) flags, without blocking, when the typed query doesn't
-  seem to name a fully-covered company.
+  seem to name a fully-covered company. `UploadFilingPanel` closes that gap
+  directly from the coverage strip: upload the annual-report PDF yourself
+  (`POST /filings/upload`), or let the system try to find and verify one
+  automatically (`POST /filings/fetch`) — a mode toggle switches between the
+  two, with live progress polled from `GET /filings/jobs/{job_id}` and an
+  automatic coverage-list refresh once ingestion finishes.
 - **Progress** (`components/progress/`) — polls every 2.5 s and renders the
   Planner's actual intermediate state. `AgentGraph` (`components/common/`) is
   the centerpiece for a single-company run: the same Planner→specialists
