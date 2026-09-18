@@ -25,18 +25,26 @@ load_dotenv()  # repo-root .env
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS research_jobs (
-    job_id            uuid        PRIMARY KEY,
-    query             text        NOT NULL,
-    status            text        NOT NULL DEFAULT 'queued',   -- queued | running | done | error
-    routing_trace     jsonb,                                   -- set when the route node finishes
-    specialist_status jsonb,                                   -- {ticker: {specialist: pending|ok|error:...}}
-    report            jsonb,                                   -- final Planner output
-    error             text,
-    created_at        timestamptz NOT NULL DEFAULT now(),
-    updated_at        timestamptz NOT NULL DEFAULT now()
+    job_id                     uuid        PRIMARY KEY,
+    query                      text        NOT NULL,
+    status                     text        NOT NULL DEFAULT 'queued',   -- queued | running | done | error
+    routing_trace              jsonb,                                   -- raw trace lines, set when routing finishes
+    routing                    jsonb,                                   -- structured routing decision, same time
+    specialist_status          jsonb,                                   -- {ticker: {specialist: pending|<stage text>|ok|error:...}}
+    estimated_duration_seconds real,                                    -- set once routing is known (historical avg for this mode)
+    estimated_duration_samples int,                                     -- how many past jobs backed that estimate
+    report                     jsonb,                                   -- final Planner output
+    error                      text,
+    created_at                 timestamptz NOT NULL DEFAULT now(),
+    updated_at                 timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS research_jobs_status_idx  ON research_jobs (status);
 CREATE INDEX IF NOT EXISTS research_jobs_created_idx ON research_jobs (created_at DESC);
+-- research_jobs predates these columns - add them for a DB that already has
+-- the table (CREATE TABLE IF NOT EXISTS is a no-op there).
+ALTER TABLE research_jobs ADD COLUMN IF NOT EXISTS routing jsonb;
+ALTER TABLE research_jobs ADD COLUMN IF NOT EXISTS estimated_duration_seconds real;
+ALTER TABLE research_jobs ADD COLUMN IF NOT EXISTS estimated_duration_samples int;
 
 CREATE TABLE IF NOT EXISTS filing_upload_jobs (
     job_id         uuid        PRIMARY KEY,
@@ -63,8 +71,11 @@ ALTER TABLE filing_upload_jobs ADD COLUMN IF NOT EXISTS source_url text;
 ALTER TABLE filing_upload_jobs ADD COLUMN IF NOT EXISTS detail text;
 """
 
-_UPDATABLE = {"status", "routing_trace", "specialist_status", "report", "error"}
-_JSONB = {"routing_trace", "specialist_status", "report"}
+_UPDATABLE = {
+    "status", "routing_trace", "routing", "specialist_status", "report", "error",
+    "estimated_duration_seconds", "estimated_duration_samples",
+}
+_JSONB = {"routing_trace", "routing", "specialist_status", "report"}
 
 _UPLOAD_UPDATABLE = {"status", "chunks_done", "chunks_total", "chunks", "error", "detail", "source_url"}
 
@@ -133,6 +144,43 @@ def get_job(job_id: str) -> dict | None:
         cur.execute("SELECT * FROM research_jobs WHERE job_id = %s", (job_id,))
         row = cur.fetchone()
     return dict(row) if row else None
+
+
+def estimate_duration_seconds(mode: str) -> tuple[float | None, int]:
+    """A real, historical-data-driven ETA, not a hardcoded guess: the average
+    wall-clock duration of past COMPLETED jobs (``updated_at - created_at``)
+    with the same routing ``mode`` ("single"/"multi"/"none") as this one, since
+    that's the single biggest driver of how long a run takes. Falls back to the
+    average across ALL completed jobs if fewer than 2 same-mode samples exist
+    yet, and to ``(None, 0)`` - no estimate, rather than fabricating one - if
+    there's no history at all. Returns ``(seconds, sample_count)`` so the
+    caller/UI can show how much history backs the number.
+
+    Deliberately not sliced further (e.g. by company count or which
+    specialists ran): with a small number of historical runs, slicing finer
+    than "mode" would leave most buckets empty. Coarser-but-real beats
+    precise-but-guessed.
+    """
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                avg(extract(epoch FROM (updated_at - created_at)))
+                    FILTER (WHERE report ->> 'mode' = %(mode)s) AS mode_avg,
+                count(*) FILTER (WHERE report ->> 'mode' = %(mode)s) AS mode_n,
+                avg(extract(epoch FROM (updated_at - created_at))) AS overall_avg,
+                count(*) AS overall_n
+            FROM research_jobs
+            WHERE status = 'done' AND report IS NOT NULL
+            """,
+            {"mode": mode},
+        )
+        mode_avg, mode_n, overall_avg, overall_n = cur.fetchone()
+    if mode_n and mode_n >= 2:
+        return float(mode_avg), int(mode_n)
+    if overall_n:
+        return float(overall_avg), int(overall_n)
+    return None, 0
 
 
 # --------------------------------------------------------------------------- #

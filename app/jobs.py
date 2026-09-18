@@ -29,8 +29,22 @@ def _progress_writer(job_id: str) -> Callable[[dict], None]:
         patch: dict[str, Any] = {}
         if "routing_trace" in frag:
             patch["routing_trace"] = frag["routing_trace"]
+        if "routing" in frag:
+            patch["routing"] = frag["routing"]
         if "specialist_status" in frag:
             patch["specialist_status"] = frag["specialist_status"]
+        if "mode" in frag:
+            # Routing just landed - this is the one point where we know enough
+            # (the run's overall shape) to give a real, historical estimate.
+            # Computed once here rather than re-derived on every poll, so it's
+            # a stable number for the client to count down from.
+            try:
+                seconds, samples = db.estimate_duration_seconds(frag["mode"])
+            except Exception:  # noqa: BLE001 - an ETA is a nicety, never fatal
+                seconds, samples = None, 0
+            if seconds is not None:
+                patch["estimated_duration_seconds"] = seconds
+                patch["estimated_duration_samples"] = samples
         if not patch:
             return
         try:

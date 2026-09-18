@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 
 from agents.filings_agent import ingested_tickers
 from app import db, filings, jobs
+from shared import llm_rate_limiter as rl
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("arthaneeti.api")
@@ -84,9 +85,18 @@ def root() -> dict:
         "endpoints": [
             "POST /research", "GET /research/{job_id}", "GET /research/{job_id}/report",
             "GET /companies", "POST /filings/upload", "POST /filings/fetch",
-            "GET /filings/jobs/{job_id}",
+            "GET /filings/jobs/{job_id}", "GET /status",
         ],
     }
+
+
+@app.get("/status")
+def status() -> dict:
+    """Live shared-quota usage per LLM provider bucket (Groq, Gemini generate,
+    Gemini embed) - the same accounting `shared/llm_rate_limiter.py` uses to
+    pace every call, exposed read-only. Useful for explaining a slow run (a
+    bucket near its daily/per-minute cap) rather than leaving it a mystery."""
+    return {"buckets": rl.snapshot()}
 
 
 @app.post("/research", status_code=202)
@@ -119,7 +129,10 @@ async def get_research(job_id: uuid.UUID) -> dict:
         "query": row["query"],
         "status": row["status"],
         "routing_trace": row["routing_trace"],
+        "routing": row["routing"],  # structured decision, set the same moment as routing_trace
         "specialist_status": row["specialist_status"],
+        "estimated_duration_seconds": row["estimated_duration_seconds"],  # real historical avg; null until routing lands or there's no history yet
+        "estimated_duration_samples": row["estimated_duration_samples"],  # how many past jobs backed that number
         "report": row["report"],  # null until the run finishes
         "error": row["error"],
         "created_at": row["created_at"],

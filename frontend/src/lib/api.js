@@ -38,7 +38,10 @@ export function submitResearch(query) {
   return request("/research", { method: "POST", body: JSON.stringify({ query }) });
 }
 
-/** GET /research/{job_id} -> full job state (status, routing_trace, specialist_status, report, error) */
+/** GET /research/{job_id} -> full job state: status, routing (structured
+ * decision, live), routing_trace (raw log lines, for the trace toggle),
+ * specialist_status, estimated_duration_seconds/_samples (a real historical
+ * ETA, or null if there's no estimate yet), report, error */
 export function getJob(jobId) {
   return request(`/research/${jobId}`);
 }
@@ -46,6 +49,12 @@ export function getJob(jobId) {
 /** GET /companies -> {full_coverage, partial_coverage} */
 export function getCompanies() {
   return request("/companies");
+}
+
+/** GET /status -> {buckets: {<provider bucket>: {last_min_requests, last_min_tokens,
+ * today_requests, today_tokens, limits, day_remaining, day_tokens_remaining}}} */
+export function getStatus() {
+  return request("/status");
 }
 
 /** POST /filings/upload (multipart) -> {job_id, status, ticker}. Not routed

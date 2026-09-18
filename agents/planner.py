@@ -309,9 +309,15 @@ async def _route_node(state: PlannerState) -> dict:
         base = _norm_ticker(rc.ticker)
         resolvable, note = await _validate_ticker(base)
         in_corpus = base in INGESTED_TICKERS
+        # Per-specialist selected/skipped-with-reason for THIS company - the same
+        # decision the trace strings below narrate, kept structured too so the
+        # frontend can render it live without parsing log lines (see `routing`
+        # below / RoutingPanel.jsx).
+        specialist_decisions: list[dict] = []
         companies_out.append({
             "name": rc.name, "ticker": base, "nse_symbol": f"{base}.NS" if base else None,
             "resolvable": resolvable, "resolution_note": note, "in_filings_corpus": in_corpus,
+            "specialists": specialist_decisions,
         })
         trace.append(
             f"company {rc.name!r} -> {base}.NS: "
@@ -326,18 +332,25 @@ async def _route_node(state: PlannerState) -> dict:
         for sp in SPECIALISTS:
             r = routes.get(sp)
             if r is None or not r.relevant:
-                trace.append(f"  -> {base}: skip {sp} - {r.reason if r else 'no route returned'}")
+                reason = r.reason if r else "no route returned"
+                specialist_decisions.append({"specialist": sp, "selected": False, "reason": reason})
+                trace.append(f"  -> {base}: skip {sp} - {reason}")
                 continue
             if sp == "market_data" and not resolvable:
-                trace.append(f"  -> {base}: skip market_data - ticker not resolvable on yfinance")
+                reason = "ticker not resolvable on yfinance"
+                specialist_decisions.append({"specialist": sp, "selected": False, "reason": reason})
+                trace.append(f"  -> {base}: skip market_data - {reason}")
                 continue
             if sp == "filings" and not in_corpus:
-                trace.append(
-                    f"  -> {base}: skip filings - not one of the {len(INGESTED_TICKERS)} ingested "
-                    f"annual reports ({', '.join(INGESTED_TICKERS)})"
+                reason = (
+                    f"not one of the {len(INGESTED_TICKERS)} ingested annual reports "
+                    f"({', '.join(INGESTED_TICKERS)})"
                 )
+                specialist_decisions.append({"specialist": sp, "selected": False, "reason": reason})
+                trace.append(f"  -> {base}: skip filings - {reason}")
                 continue
             per[sp] = (r.sub_query or "").strip() or _DEFAULT_SUBQ[sp]
+            specialist_decisions.append({"specialist": sp, "selected": True, "reason": r.reason})
             trace.append(f"  -> {base}: call {sp} - {r.reason}")
         if per:
             plan[base] = per
@@ -370,7 +383,9 @@ async def _route_node(state: PlannerState) -> dict:
 
     routing = {
         "companies_identified": [
-            {k: c[k] for k in ("name", "ticker", "resolvable", "in_filings_corpus")} for c in companies_out
+            {k: c[k] for k in
+             ("name", "ticker", "resolvable", "resolution_note", "in_filings_corpus", "specialists")}
+            for c in companies_out
         ],
         "is_comparison": decision.is_comparison,
         "mode": mode,
@@ -409,9 +424,17 @@ async def _gather_node(state: PlannerState) -> dict:
     async def _one(ticker: str, specialist: str, sub_query: str) -> None:
         company = names.get(ticker, ticker)
         full_q = f"{company} ({ticker}.NS): {sub_query}"
+
+        def stage(msg: str) -> None:
+            # Per-tool-call granularity while a specialist runs (previously this
+            # cell just sat at "pending" for the whole 1-2 minutes) - "calling
+            # get_quote...", "reading results...", "writing summary...".
+            status[ticker][specialist] = msg
+            _emit(specialist_status=_deep(status))
+
         async with sem:
             try:
-                out = await _RUNNERS[specialist](full_q, model_name=model_name)
+                out = await _RUNNERS[specialist](full_q, model_name=model_name, on_stage=stage)
             except BaseException as exc:  # noqa: BLE001
                 flat = _base.flatten_exc(exc)
                 head = flat[0] if flat else exc

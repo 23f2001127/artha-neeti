@@ -243,7 +243,7 @@ def _collect_provenance(call_log: list[dict]) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-async def run(query: str, *, model_name: str = DEFAULT_MODEL) -> dict:
+async def run(query: str, *, model_name: str = DEFAULT_MODEL, on_stage=None) -> dict:
     """Answer one news / sentiment / announcements question."""
     return await _base.run_agent(
         server_path=RESEARCH_SERVER,
@@ -252,6 +252,7 @@ async def run(query: str, *, model_name: str = DEFAULT_MODEL) -> dict:
         synthesize=_synthesize,
         collect_provenance=_collect_provenance,
         model_name=model_name,
+        on_stage=on_stage,
     )
 
 

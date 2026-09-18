@@ -6,15 +6,16 @@ const SPECIALIST_LABEL = {
   filings: "Filings",
 };
 
-/** cell status as stored by the backend: "pending" | "ok" | "error: <msg>" */
+/** cell status as stored by the backend: "pending" | "ok" | "error: <msg>" |
+ * an in-progress stage string, e.g. "calling get_quote...", "thinking..." */
 export function specialistLabel(key) {
   return SPECIALIST_LABEL[key] || key;
 }
 
 function kindOf(status) {
-  if (!status || status === "pending") return "pending";
-  if (status === "ok") return "ok";
-  return "error";
+  if (!status || status === "ok") return status === "ok" ? "ok" : "pending";
+  if (typeof status === "string" && status.startsWith("error")) return "error";
+  return "pending"; // any other string is a live stage description - still in progress
 }
 
 const CONFIG = {
@@ -25,13 +26,16 @@ const CONFIG = {
 
 export default function StatusBadge({ status, compact = false }) {
   const kind = kindOf(status);
-  const { color, label } = CONFIG[kind];
+  const { color, label: fallbackLabel } = CONFIG[kind];
   const detail = kind === "error" && status.startsWith("error:") ? status.slice(6).trim() : status;
+  // A pending cell whose status is more than the bare seed value ("pending")
+  // is carrying a live stage description - show that instead of just "running".
+  const label = kind === "pending" && status && status !== "pending" ? status : fallbackLabel;
 
   return (
     <AnimatePresence mode="wait" initial={false}>
       <motion.span
-        key={kind}
+        key={status || kind}
         title={kind === "error" ? detail : undefined}
         className="inline-flex items-center gap-1.5 text-[12px]"
         style={{ color }}

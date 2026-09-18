@@ -92,6 +92,7 @@ The Groq-for-reasoning / Gemini-for-classification-and-embeddings split is delib
 | FastAPI service layer | ✅ built — job-based API (queries take minutes), live progress via Postgres, tested |
 | React frontend | ✅ built — landing page, live agent-trace progress view, cited report view, dark/light theme |
 | Filings beyond the seeded 10 (upload + auto-fetch) | ✅ built — `POST /filings/upload` (a PDF you have) and `POST /filings/fetch` (best-effort web search + download), both wired into Planner routing and `GET /companies` |
+| Real progress (routing live, per-tool-call stages, historical ETA) | ✅ built — no more static spinner or hardcoded time estimate; see `app/README.md`'s "How live progress works" |
 | Deployment | ⬜ not started |
 
 Each component has its own README with the design decisions, test evidence, and known limitations (`mcp_servers/*/README.md`, `agents/README.md`, `shared/README.md`). The agent tests are runnable scripts that print full reasoning traces and structured output, not just pass/fail.
@@ -152,6 +153,7 @@ curl -X POST localhost:8000/research -H 'content-type: application/json' \
 
 curl localhost:8000/research/<job_id>   # status, routing_trace (early), specialist_status (live), report (when done)
 curl localhost:8000/companies           # full vs partial coverage
+curl localhost:8000/status              # live LLM-quota usage per provider bucket
 
 # a company outside the seeded 10 - upload its annual report, or let the system try to find it
 curl -X POST localhost:8000/filings/upload -F "ticker=ITC" -F file=@itc_annual_report.pdf
@@ -188,6 +190,9 @@ python shared/test_llm_rate_limiter.py
 - [x] FastAPI service layer — job-based API, live progress persisted to Postgres
 - [x] React frontend — landing page, live agent-trace view, cited report view
 - [x] Filings beyond the seeded 10 — manual upload and best-effort web auto-fetch
+- [x] Real progress — structured routing pushed live, per-tool-call stage text
+      instead of a static spinner, a historical-data-driven ETA, `GET /status`
+      for live quota visibility
 - [ ] Follow-up conversational queries
 - [ ] Portfolio-level analysis
 - [ ] UI/branding polish pass

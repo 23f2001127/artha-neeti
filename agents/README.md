@@ -318,8 +318,8 @@ result = plan_sync("give me a complete research view on TCS")
 
 | node | what it does |
 |---|---|
-| **route** | one Groq call → which compan(ies) (resolved to NSE tickers), single vs multi, and **which of the 3 specialists each company actually needs** — selective, with a stated reason for every skip. Tickers are confirmed on yfinance (`fast_info`, existence only — the one place the Planner touches yfinance; known large-caps skip the lookup). Filings is skipped up front for any company outside the 10-report RAG corpus (`filings_agent.INGESTED_TICKERS`). |
-| **gather** | runs the selected specialists as a bounded-concurrency fan-out over the (company × specialist) matrix. Each is the existing agent via its own `run` coroutine — nothing reimplemented. A specialist that errors becomes `{"error": …}` in that cell, not a crash. |
+| **route** | one Groq call → which compan(ies) (resolved to NSE tickers), single vs multi, and **which of the 3 specialists each company actually needs** — selective, with a stated reason for every skip. Tickers are confirmed on yfinance (`fast_info`, existence only — the one place the Planner touches yfinance; known large-caps skip the lookup). Filings is skipped up front for any company outside the current filings RAG corpus (`filings_agent.ingested_tickers()` — DB-backed, so an upload/auto-fetch mid-session is picked up without a restart; see `mcp_servers/filings_rag_mcp`). |
+| **gather** | runs the selected specialists as a bounded-concurrency fan-out over the (company × specialist) matrix. Each is the existing agent via its own `run` coroutine — nothing reimplemented. Each call also gets an `on_stage` callback (see `_base.run_agent`) that pushes short live-progress strings ("calling get_quote...", "thinking...", "writing summary...") into `specialist_status`, so a polling client sees per-tool-call granularity instead of one static "running" for the whole call. A specialist that errors becomes `{"error": …}` in that cell, not a crash. |
 | **synthesize** | one `synthesis_agent.synthesize` call per company over whatever cells came back — its proven Case-2 partial handling does the rest. |
 | **compare** | multi-company only: a light Groq call over the *finished* per-company reports → `{verdict, dimensions[], caveats[]}`. |
 | **finalize** | assembles the output incl. the full routing rationale. |
@@ -339,7 +339,10 @@ that fans out to up to 6 specialist agents and 429-cascaded at 2 on the free Gro
 budget (~5k tokens/min shared measured, machine memory-tight). At 1 the fan-out
 serializes through the shared limiter and calls wait rather than fail.
 
-**Routing transparency is a first-class output**, not internal logic:
+**Routing transparency is a first-class output**, not internal logic - and it's
+pushed live (`plan(on_progress=...)` - see `app/README.md`'s "How live
+progress works") the moment the route node finishes, not just present once the
+whole run is `done`:
 
 ```python
 {
@@ -350,14 +353,24 @@ serializes through the shared limiter and calls wait rather than fail.
      "specialists_skipped":  [{"specialist", "reason"}],   # a real reason per skip
      "sub_queries": {ticker: {specialist: "..."}},
      "rationale": "...",                                    # the router LLM's own paragraph
+     "companies_identified": [{
+         "name", "ticker", "resolvable", "resolution_note", "in_filings_corpus",
+         "specialists": [{"specialist", "selected": bool, "reason"}],   # PER-COMPANY breakdown -
+     }],                                                                # a multi-company query can
+                                                                         # route each company differently
   },
-  "routing_trace": [ "company 'X' -> X.NS: RESOLVABLE ...", "  -> X: skip filings - not one of the 10 ...", ... ],
+  "routing_trace": [ "company 'X' -> X.NS: RESOLVABLE ...", "  -> X: skip filings - not one of the ingested corpus", ... ],
   "graph_path": ["route: ...", "gather: 3/3 ok ...", "synthesize: ...", "finalize"],
   "reports": {ticker: <full synthesis report>},
   "comparison": {...} | None,
-  "specialist_status": {ticker: {specialist: "ok" | "error: ..."}},
+  "specialist_status": {ticker: {specialist: "pending" | "<live stage text>" | "ok" | "error: ..."}},
 }
 ```
+
+`routing_trace` is the same information as a flat, human-readable log - kept
+for the frontend's optional "show full trace" toggle - but `routing` is the
+structured version a UI should actually render against; nothing needs to
+parse trace lines back into structure anymore.
 
 ### Test
 

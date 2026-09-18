@@ -28,6 +28,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 load_dotenv(_REPO_ROOT / ".env", override=False)
 
+from langchain_core.callbacks import AsyncCallbackHandler  # noqa: E402
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage  # noqa: E402
 from langchain_core.tools import StructuredTool  # noqa: E402
 from langchain_groq import ChatGroq  # noqa: E402
@@ -280,6 +281,34 @@ def extract_trace(messages: list) -> list[dict]:
 # --------------------------------------------------------------------------- #
 Synthesizer = Callable[[RateLimitedChatGroq, str, list[dict]], Awaitable[dict]]
 ProvenanceFn = Callable[[list[dict]], dict]
+StageFn = Callable[[str], None]
+
+
+class _StageCallback(AsyncCallbackHandler):
+    """Turns a ReAct loop's tool calls and model turns into short human-readable
+    stage strings ("calling get_quote...") via ``on_stage``, so a client polling
+    mid-run sees what's actually happening instead of one static "running" for
+    up to a couple of minutes. Best-effort: ``on_stage`` itself is expected not
+    to raise, but a callback failing must never break the actual agent run."""
+
+    def __init__(self, on_stage: StageFn):
+        self._on_stage = on_stage
+
+    def _fire(self, msg: str) -> None:
+        try:
+            self._on_stage(msg)
+        except Exception:  # noqa: BLE001 - progress reporting is never fatal
+            pass
+
+    async def on_chat_model_start(self, serialized, messages, **kwargs) -> None:
+        self._fire("thinking...")
+
+    async def on_tool_start(self, serialized, input_str, **kwargs) -> None:
+        name = (serialized or {}).get("name") or "a tool"
+        self._fire(f"calling {name}...")
+
+    async def on_tool_end(self, output, **kwargs) -> None:
+        self._fire("reading results...")
 
 
 async def run_agent(
@@ -292,27 +321,40 @@ async def run_agent(
     model_name: str = DEFAULT_MODEL,
     compact_tool_result: Callable[[str, Any], Any] | None = None,
     recursion_limit: int = RECURSION_LIMIT,
+    on_stage: StageFn | None = None,
 ) -> dict:
     """Connect to one MCP server, run the ReAct loop + synthesis, return the
     standard agent result dict. Agent-specific bits are the three callables/strings.
 
     ``compact_tool_result(tool_name, payload)`` (optional): shrink what the ReAct
     loop sees per tool call. ``raw_data`` / provenance still get the full payload.
+    ``on_stage(msg)`` (optional): fired with a short phase string at each
+    meaningful step (connecting, thinking, calling a tool, synthesizing) - see
+    ``_StageCallback``. Purely observational; never changes what the agent does.
     """
     if not query or not query.strip():
         return {"query": query, "error": "query is empty."}
 
+    def stage(msg: str) -> None:
+        if on_stage:
+            try:
+                on_stage(msg)
+            except Exception:  # noqa: BLE001 - progress reporting is never fatal
+                pass
+
     params = StdioServerParameters(command=sys.executable, args=[server_path])
     call_log: list[dict] = []
     try:
+        stage("connecting...")
         async with Client(params) as client:
             tools = await load_mcp_tools(client, call_log, to_llm=compact_tool_result)
             model = make_model(model_name)
             agent = create_react_agent(model, tools, prompt=system_prompt)
-            state = await agent.ainvoke(
-                {"messages": [HumanMessage(query)]},
-                config={"recursion_limit": recursion_limit},
-            )
+            config: dict[str, Any] = {"recursion_limit": recursion_limit}
+            if on_stage:
+                config["callbacks"] = [_StageCallback(stage)]
+            state = await agent.ainvoke({"messages": [HumanMessage(query)]}, config=config)
+            stage("writing summary...")
             synth = await synthesize(model, query, call_log)
             trace = extract_trace(state["messages"])
     except BaseException as exc:  # noqa: BLE001 - unwrap anyio/MCP ExceptionGroups

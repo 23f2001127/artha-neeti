@@ -40,15 +40,24 @@ no axios, no query-caching library — polling a single job doesn't need one.
   two, with live progress polled from `GET /filings/jobs/{job_id}` and an
   automatic coverage-list refresh once ingestion finishes.
 - **Progress** (`components/progress/`) — polls every 2.5 s and renders the
-  Planner's actual intermediate state. `AgentGraph` (`components/common/`) is
-  the centerpiece for a single-company run: the same Planner→specialists
-  diagram as the landing page, but wired to real `specialist_status` — nodes
-  animate from idle to running (pulsing ring) to done/error/skipped as the run
-  actually progresses. Below it, `RoutingPanel` (selected vs. skipped
-  specialists, with reasons — the routing transparency is the point, not an
-  afterthought) and `SpecialistGrid` (a company × specialist matrix, each cell
-  spring-animating `pending → ok/error`) cover the multi-company case the
-  diagram doesn't try to.
+  Planner's actual intermediate state, including a real ETA: `estimated_duration_seconds`
+  is a historical average from past completed runs of the same shape (computed
+  server-side the moment routing lands, see `app/README.md`), counted down
+  client-side against elapsed time measured from the job's own `created_at`
+  (not page-load time, so a refreshed or shared job link still shows the right
+  elapsed/remaining). With no history yet, it says so plainly instead of
+  guessing. `AgentGraph` (`components/common/`) is the centerpiece for a
+  single-company run: the same Planner→specialists diagram as the landing
+  page, but wired to real `specialist_status` — nodes animate from idle to
+  running (pulsing ring) to done/error/skipped as the run actually progresses.
+  Below it, `RoutingPanel` (selected vs. skipped specialists, with reasons —
+  the routing transparency is the point, not an afterthought) and
+  `SpecialistGrid` (a company × specialist matrix) cover the multi-company case
+  the diagram doesn't try to. Each `SpecialistGrid` cell doesn't just flip
+  `pending → ok/error` anymore — while a specialist is running, `StatusBadge`
+  shows the actual live stage text the backend pushes per tool call
+  ("calling get_quote...", "thinking...", "writing summary..."), so a 1-2
+  minute specialist call reads as visible progress instead of a static spinner.
 - **Report** (`components/report/`) — executive summary, per-specialist
   sections, `ConflictsPanel` (cross-specialist tensions, reconciled, given equal
   visual weight to the summary rather than buried), `SourcesPanel` (a
@@ -56,23 +65,22 @@ no axios, no query-caching library — polling a single job doesn't need one.
   default so it's present but doesn't compete with the findings), and for
   multi-company queries, `ComparisonView` (verdict + a dimension table).
 
-## A gap in the live API, worked around client-side
+## Routing renders off the structured decision, not parsed log lines
 
-`GET /research/{job_id}` only exposes the Planner's raw `routing_trace` log
-lines while a job is running — the *structured* routing decision
-(`specialists_selected` / `specialists_skipped` with reasons / `rationale`) only
-appears inside `report.routing` once the job is `done` (see `app/jobs.py`'s
-progress writer, which currently forwards `routing_trace` but drops the richer
-`routing` fragment the Planner already emits). `lib/parseRoutingTrace.js`
-reconstructs the same structure by parsing the trace lines' stable, documented
-format from `agents/planner.py`, so the routing panel can show it live either
-way. Anything that doesn't match a known line shape is preserved verbatim in the
-trace instead of dropped — "Show full trace" always renders the untouched lines.
+`GET /research/{job_id}` exposes the Planner's structured `routing` object
+live — the moment the route node finishes, not just once the job is `done` —
+with a per-company breakdown (`companies_identified[].specialists[]`: which
+specialists were selected/skipped for THAT company, and why). `RoutingPanel`
+renders directly off it. `routing_trace` (the same decision as flat log lines)
+is kept only for an optional "show full trace" toggle.
 
-**This is a workaround, not the ideal fix.** Adding `routing` alongside
-`routing_trace` to the job row and the poll response would be a small, additive
-change to `app/` and let this component drop the parser entirely. Not made here
-per the instruction not to touch the backend without asking.
+This used to be a client-side workaround: the poll response only carried raw
+`routing_trace` lines while running, and `lib/parseRoutingTrace.js`
+reconstructed the structure by regex-parsing them. That gap was closed on the
+backend (`agents/planner.py` now builds the per-company breakdown structurally
+instead of only narrating it into trace strings; `app/jobs.py` forwards
+`routing` alongside `routing_trace`) and the parser was deleted — nothing
+reconstructs structure from log lines anymore.
 
 ## Design direction
 

@@ -2,18 +2,20 @@ import { motion } from "framer-motion";
 import { useEffect, useMemo, useState } from "react";
 import AgentGraph from "../common/AgentGraph";
 import { deriveAgentGraph } from "../../lib/deriveAgentGraph";
-import { parseRoutingTrace } from "../../lib/parseRoutingTrace";
 import RoutingPanel from "./RoutingPanel";
 import SpecialistGrid from "./SpecialistGrid";
 
-function useElapsed(startedAt) {
+/** Elapsed since the job actually started (server created_at), not since this
+ * component mounted - a refresh or a shared job link must not reset the clock,
+ * since the real ETA below is computed against this same elapsed time. */
+function useElapsed(createdAt) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
-  if (!startedAt) return 0;
-  return Math.max(0, Math.round((now - startedAt) / 1000));
+  if (!createdAt) return 0;
+  return Math.max(0, Math.round((now - new Date(createdAt).getTime()) / 1000));
 }
 
 function fmtElapsed(sec) {
@@ -22,13 +24,30 @@ function fmtElapsed(sec) {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
+/** A real ETA string, or an honest "no estimate yet" - never a hardcoded
+ * guess. estimated_duration_seconds is the historical average (same routing
+ * mode) computed server-side the moment routing lands (see app/jobs.py). */
+function etaLabel(job, elapsed) {
+  const est = job?.estimated_duration_seconds;
+  if (est == null) {
+    return job?.routing
+      ? "no ETA yet — not enough completed runs of this kind to estimate from"
+      : null;
+  }
+  const remaining = Math.round(est - elapsed);
+  const samples = job.estimated_duration_samples;
+  const basis = `based on ${samples} past run${samples === 1 ? "" : "s"} of this kind`;
+  if (remaining <= 5) return `wrapping up any moment — ${basis}`;
+  return `~${fmtElapsed(remaining)} remaining — ${basis}`;
+}
+
 function phaseLabel(job) {
   if (!job) return "Submitting…";
   if (job.status === "queued") return "Queued";
   const cells = Object.values(job.specialist_status || {}).flatMap((per) => Object.values(per));
-  if (!job.routing_trace) return "Resolving companies and choosing specialists…";
+  if (!job.routing) return "Resolving companies and choosing specialists…";
   if (cells.length === 0) return "Dispatching specialists…";
-  const inFlight = cells.filter((c) => c === "pending").length;
+  const inFlight = cells.filter((c) => c !== "ok" && !(typeof c === "string" && c.startsWith("error"))).length;
   if (inFlight > 0) return `Running specialists — ${cells.length - inFlight} of ${cells.length} done`;
   return "Reconciling specialist findings into a report…";
 }
@@ -39,18 +58,18 @@ const fadeUp = {
 };
 
 export default function ProgressView({ job, pollError, onNewQuery }) {
-  const [startedAt] = useState(() => Date.now());
-  const elapsed = useElapsed(startedAt);
+  const elapsed = useElapsed(job?.created_at);
+  const eta = etaLabel(job, elapsed);
 
   const companyCount = useMemo(() => {
     const fromStatus = Object.keys(job?.specialist_status || {}).length;
     if (fromStatus) return fromStatus;
-    return parseRoutingTrace(job?.routing_trace)?.companies.length || 0;
-  }, [job?.specialist_status, job?.routing_trace]);
+    return job?.routing?.companies_identified?.length || 0;
+  }, [job?.specialist_status, job?.routing]);
 
   const graph = useMemo(
-    () => (companyCount <= 1 ? deriveAgentGraph(job?.routing_trace, job?.specialist_status) : null),
-    [companyCount, job?.routing_trace, job?.specialist_status],
+    () => (companyCount <= 1 ? deriveAgentGraph(job?.routing, job?.specialist_status) : null),
+    [companyCount, job?.routing, job?.specialist_status],
   );
 
   return (
@@ -76,9 +95,9 @@ export default function ProgressView({ job, pollError, onNewQuery }) {
           {phaseLabel(job)}
         </span>
         <span className="mono text-[12px] text-[var(--color-ink-faint)]">{fmtElapsed(elapsed)} elapsed</span>
-        <span className="text-[11.5px] text-[var(--color-ink-faint)] hidden sm:inline">
-          — typically a few minutes; multi-company comparisons take longer
-        </span>
+        {eta && (
+          <span className="text-[11.5px] text-[var(--color-ink-faint)] hidden sm:inline">— {eta}</span>
+        )}
       </motion.div>
 
       {pollError && (
@@ -100,7 +119,7 @@ export default function ProgressView({ job, pollError, onNewQuery }) {
       )}
 
       <motion.div variants={fadeUp} initial="hidden" animate="show" custom={2} className="space-y-5">
-        <RoutingPanel routingTrace={job?.routing_trace} />
+        <RoutingPanel routing={job?.routing} routingTrace={job?.routing_trace} />
         <SpecialistGrid specialistStatus={job?.specialist_status} />
       </motion.div>
     </div>

@@ -32,7 +32,7 @@ export default function ReportView({ job, onNewQuery }) {
         <div className="rounded-[var(--radius-md)] border border-[var(--color-error-tint)] bg-[var(--color-error-tint)] px-4 py-3 mb-4">
           <p className="text-[13.5px] text-[var(--color-error)]">{job.error || "The run failed."}</p>
         </div>
-        {job.routing_trace && <RoutingPanel routingTrace={job.routing_trace} />}
+        {job.routing && <RoutingPanel routing={job.routing} routingTrace={job.routing_trace} />}
         <button
           onClick={onNewQuery}
           className="mt-6 text-[13px] font-medium px-4 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-brand)] text-[var(--color-bg)] hover:bg-[var(--color-brand-soft)] transition-colors cursor-pointer"
@@ -84,7 +84,7 @@ export default function ReportView({ job, onNewQuery }) {
         </button>
         {showRouting && (
           <div className="mt-3">
-            <RoutingPanel routingTrace={report.routing_trace} />
+            <RoutingPanel routing={report.routing} routingTrace={report.routing_trace} />
           </div>
         )}
       </div>

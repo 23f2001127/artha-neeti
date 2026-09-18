@@ -359,7 +359,7 @@ def _collect_provenance(call_log: list[dict]) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-async def run(query: str, *, model_name: str = DEFAULT_MODEL) -> dict:
+async def run(query: str, *, model_name: str = DEFAULT_MODEL, on_stage=None) -> dict:
     """Answer one question about a company's annual-report disclosures."""
     return await _base.run_agent(
         server_path=FILINGS_SERVER,
@@ -370,6 +370,7 @@ async def run(query: str, *, model_name: str = DEFAULT_MODEL) -> dict:
         model_name=model_name,
         compact_tool_result=_compact,
         recursion_limit=_RECURSION_LIMIT,
+        on_stage=on_stage,
     )
 
 
