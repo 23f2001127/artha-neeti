@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import { uploadFiling, fetchFiling, getFilingJob, ApiError } from "../../lib/api";
 
 const POLL_MS = 1500;
@@ -201,12 +201,15 @@ export default function UploadFilingPanel({ onUploaded }) {
 
           {submitError && <p className="text-[12px] text-[var(--color-error)]">{submitError}</p>}
 
-          <AnimatePresence>
-            {job && (
+          {/* No AnimatePresence: its exit transition never completes with
+              this framer-motion/React 19 pairing (confirmed live elsewhere
+              in this app) and would leave this panel stacked in the DOM
+              forever once `job` resets. Plain conditional rendering unmounts
+              it immediately and correctly, just without a fade-out. */}
+          {job && (
               <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
                 className="rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface-muted)] px-3 py-2.5"
               >
                 {job.status !== "error" && (
@@ -243,8 +246,7 @@ export default function UploadFilingPanel({ onUploaded }) {
                   <p className="text-[12px] text-[var(--color-error)]">{job.error || "Ingestion failed."}</p>
                 )}
               </motion.div>
-            )}
-          </AnimatePresence>
+          )}
         </motion.form>
       )}
     </div>

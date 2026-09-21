@@ -1,4 +1,4 @@
-import { AnimatePresence, motion } from "framer-motion";
+import { motion } from "framer-motion";
 import { useCallback, useEffect, useState } from "react";
 import Header from "./components/layout/Header";
 import LandingPage from "./components/landing/LandingPage";
@@ -13,10 +13,16 @@ function jobIdFromUrl() {
   return new URLSearchParams(window.location.search).get("job");
 }
 
+// Enter-only (no `exit`/AnimatePresence): confirmed live that this framer-
+// motion/React 19 pairing never fires AnimatePresence's exit-complete
+// callback, which either permanently freezes the view (mode="wait") or
+// leaves the outgoing view's DOM stacked on top of the new one forever
+// (default mode) - a real, reproducible bug, not a config choice. Plain
+// key-based remount still unmounts the old view immediately and correctly;
+// it just skips an exit animation, which is a fine trade for correctness.
 const fade = {
   initial: { opacity: 0, y: 8 },
   animate: { opacity: 1, y: 0 },
-  exit: { opacity: 0, y: -8 },
   transition: { duration: 0.25, ease: "easeOut" },
 };
 
@@ -90,11 +96,9 @@ function AppShell() {
     <div className="min-h-screen flex flex-col bg-[var(--color-bg)]">
       <Header onLogoClick={goToLanding} />
       <main className="flex-1 w-full">
-        <AnimatePresence mode="wait">
-          <motion.div key={key} {...fade}>
-            {content}
-          </motion.div>
-        </AnimatePresence>
+        <motion.div key={key} {...fade}>
+          {content}
+        </motion.div>
       </main>
     </div>
   );
