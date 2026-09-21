@@ -109,6 +109,40 @@ export function askFollowup(jobId, query) {
   });
 }
 
+/** GET /research/{job_id}/report.pdf -> triggers a real .pdf file download.
+ * Fetched as a Blob rather than a plain <a href> because of the same dev-proxy /
+ * VITE_API_BASE_DIRECT split every other call already goes through `request()` for. */
+export async function downloadReportPdf(jobId, filename = "arthaneeti-report.pdf") {
+  let res;
+  try {
+    res = await fetch(`${BASE}/research/${jobId}/report.pdf`);
+  } catch {
+    throw new ApiError(
+      "Could not reach the research API. Is the backend running (uvicorn app.main:app)?",
+      0,
+      null,
+    );
+  }
+  if (!res.ok) {
+    let detail = `Request failed (${res.status})`;
+    try {
+      detail = (await res.json())?.detail || detail;
+    } catch {
+      // body wasn't JSON - keep the generic message
+    }
+    throw new ApiError(detail, res.status, null);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 /** GET /research/{job_id}/followups -> {conversation_id, turns: [...]} */
 export function getFollowups(jobId) {
   return request(`/research/${jobId}/followups`);

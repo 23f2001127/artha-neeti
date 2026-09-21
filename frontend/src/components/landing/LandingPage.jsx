@@ -2,6 +2,7 @@ import { motion } from "framer-motion";
 import ThemeToggle from "../layout/ThemeToggle";
 import HeroDiagram from "./HeroDiagram";
 import StatCounter from "./StatCounter";
+import ExampleGallery from "./ExampleGallery";
 
 const STATS = [
   { value: 10, label: "companies with full filings coverage" },
@@ -65,7 +66,7 @@ const stagger = {
   show: { transition: { staggerChildren: 0.09 } },
 };
 
-export default function LandingPage({ onLaunch }) {
+export default function LandingPage({ onLaunch, onViewJob }) {
   return (
     <div className="relative">
       {/* nav */}
@@ -218,6 +219,18 @@ export default function LandingPage({ onLaunch }) {
           </motion.div>
         </Section>
       </div>
+
+      {/* example reports */}
+      <Section className="pb-24">
+        <motion.div initial="hidden" whileInView="show" viewport={{ once: true, margin: "-80px" }} variants={stagger}>
+          <motion.h2 variants={fadeUp} className="text-[13px] font-semibold uppercase tracking-wide text-[var(--color-ink-faint)] mb-8">
+            See a real report
+          </motion.h2>
+          <motion.div variants={stagger}>
+            <ExampleGallery onViewJob={onViewJob} />
+          </motion.div>
+        </motion.div>
+      </Section>
 
       {/* closing CTA */}
       <Section className="py-24 text-center">

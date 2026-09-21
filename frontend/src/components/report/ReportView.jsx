@@ -4,6 +4,7 @@ import CompanyReportCard from "./CompanyReportCard";
 import ComparisonView from "./ComparisonView";
 import PortfolioView from "./PortfolioView";
 import FollowUpPanel from "./FollowUpPanel";
+import { downloadReportPdf, ApiError } from "../../lib/api";
 
 function CopyLinkButton() {
   const [copied, setCopied] = useState(false);
@@ -17,6 +18,31 @@ function CopyLinkButton() {
       className="text-[12px] text-[var(--color-ink-muted)] hover:text-[var(--color-brand)] border border-[var(--color-border)] rounded-[var(--radius-sm)] px-3 py-1.5 transition-colors cursor-pointer"
     >
       {copied ? "Link copied" : "Copy link"}
+    </button>
+  );
+}
+
+function DownloadPdfButton({ jobId, tickers }) {
+  const [state, setState] = useState("idle"); // idle | downloading | error
+  async function handleClick() {
+    setState("downloading");
+    try {
+      const slug = tickers.map((t) => t.toLowerCase()).join("-") || "report";
+      await downloadReportPdf(jobId, `arthaneeti-${slug}.pdf`);
+      setState("idle");
+    } catch (err) {
+      setState("error");
+      setTimeout(() => setState("idle"), 2500);
+      console.error(err instanceof ApiError ? err.message : err);
+    }
+  }
+  return (
+    <button
+      onClick={handleClick}
+      disabled={state === "downloading"}
+      className="text-[12px] text-[var(--color-ink-muted)] hover:text-[var(--color-brand)] border border-[var(--color-border)] rounded-[var(--radius-sm)] px-3 py-1.5 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+    >
+      {state === "downloading" ? "Preparing…" : state === "error" ? "Couldn't download" : "Download PDF"}
     </button>
   );
 }
@@ -68,6 +94,7 @@ export default function ReportView({ job, onNewQuery, onEscalate }) {
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <CopyLinkButton />
+          {!isNone && <DownloadPdfButton jobId={job.job_id} tickers={tickers} />}
           <button
             onClick={onNewQuery}
             className="text-[12px] font-medium text-[var(--color-bg)] bg-[var(--color-brand)] hover:bg-[var(--color-brand-soft)] rounded-[var(--radius-sm)] px-3 py-1.5 transition-colors cursor-pointer"

@@ -62,9 +62,15 @@ function AppShell() {
     setJobId(null);
     setScreen("landing");
   }, []);
+  // A gallery card on the landing page - same transition as opening a
+  // shared ?job= link, just triggered from a click instead of the URL.
+  const onViewJob = useCallback((viewJobId) => {
+    setJobId(viewJobId);
+    setScreen("app");
+  }, []);
 
   if (screen === "landing") {
-    return <LandingPage onLaunch={goToQuery} />;
+    return <LandingPage onLaunch={goToQuery} onViewJob={onViewJob} />;
   }
 
   let content;

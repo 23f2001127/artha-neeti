@@ -2,13 +2,38 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ArthaNeeti</title>
     <meta name="description" content="Multi-agent Indian equity research — grounded, cited, and transparent about how it got there." />
+
+    <!-- Favicon: SVG for modern browsers, PNG fallbacks + manifest for
+         bookmarks / mobile "add to home screen" / older browsers. Regenerate
+         all of these from scripts/generate-brand-assets.mjs if the mark
+         (public/favicon.svg) ever changes - see frontend/README.md. -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <meta name="theme-color" content="#34c795" />
+
+    <!-- Social share preview (LinkedIn, Twitter/X, iMessage, Slack, ...).
+         og:image is relative - resolves against whatever domain this is
+         deployed at, nothing to change here at deploy time. -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="ArthaNeeti — Multi-agent Indian equity research" />
+    <meta property="og:description" content="Multi-agent Indian equity research — grounded, cited, and transparent about how it got there." />
+    <meta property="og:image" content="/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="ArthaNeeti — Multi-agent Indian equity research" />
+    <meta name="twitter:description" content="Multi-agent Indian equity research — grounded, cited, and transparent about how it got there." />
+    <meta name="twitter:image" content="/og-image.png" />
+
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,400..700;1,14..32,400..700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
-    <title>ArthaNeeti</title>
     <script>
       // Applied before first paint so there is never a flash of the wrong
       // theme. Dark is the default when nothing is stored yet.

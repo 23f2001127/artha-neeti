@@ -15,6 +15,7 @@ background job, and persist/expose its progress.
 | `POST /research` `{"query": str}` | Creates a `research_jobs` row (`status: queued`), fires the Planner as a **detached `asyncio` task**, returns `{job_id, status}` at once. Never blocks on the run. |
 | `GET /research/{job_id}` | The poll endpoint. `status` (`queued`/`running`/`done`/`error`), `routing` (the structured routing decision, present once the route node finishes — seconds in) + `routing_trace` (the same decision as flat log lines, for an optional "full trace" view), `specialist_status` (`{ticker: {specialist: "pending"\|"<live stage text>"\|"ok"\|"error:…"}}`, updated per tool call — not just per specialist), `estimated_duration_seconds`/`estimated_duration_samples` (a real historical-average ETA computed the moment routing lands — see below; `null` until then or if there's no history yet), `report` (the final Planner output, once done), `error`. |
 | `GET /research/{job_id}/report` | Just the finished report. `409` while still `queued`/`running`. |
+| `GET /research/{job_id}/report.pdf` | The finished report as a real downloadable PDF (`Content-Disposition: attachment`) — `app/report_pdf.py` renders the same report dict into a document via `xhtml2pdf`. See "PDF export" below for why that library and not `weasyprint`. |
 | `POST /research/{job_id}/followups` `{query}` | A cheap, **synchronous** follow-up on a finished report — one LLM call, answered within the request (no job/poll needed). Returns `{sufficient_data, answer?, caveat?, missing_reason?, standalone_query?}`. See "Follow-up conversations" below. |
 | `GET /research/{job_id}/followups` | Past follow-up turns for this job's conversation, chronological: `{conversation_id, turns: [...]}`. |
 | `POST /research/{job_id}/followups/escalate` `{standalone_query}` | When a follow-up needs fresh data: starts a real Planner run continuing the conversation (`conversation_id` inherited, `parent_job_id` set). Same dispatch as `POST /research` — returns `{job_id, status}`, poll it the same way. |
@@ -96,6 +97,42 @@ valid from the prior run. Deciding what's "still valid" (is last run's news
 still fresh? did the filing change?) is real complexity that didn't seem worth
 taking on for the first version — a full re-run is simple, correct, and the
 cost is opt-in. Worth revisiting if follow-ups turn out to escalate often.
+
+## PDF export (`app/report_pdf.py`)
+
+`GET /research/{job_id}/report.pdf` needed to return an actual generated
+file, not a browser print dialog — two ways to make a real PDF appear
+server-side, both tried:
+
+- **`weasyprint`** (HTML/CSS → PDF, the usual first choice) installs via pip
+  cleanly but **fails at runtime** without the GTK/Pango/GObject native
+  runtime, which pip doesn't provide (confirmed on this project's own
+  Windows dev machine: `OSError: cannot load library 'libgobject-2.0-0'`).
+  Requiring a separate GTK3 installer just to run this project is a real
+  setup-friction regression for anyone cloning it — rejected.
+- **`xhtml2pdf`** (HTML/CSS → PDF via `reportlab` underneath) is pure
+  Python with zero system dependencies and renders cleanly everywhere pip
+  works. This is what's used.
+
+`render_report_html(report) -> str` builds a self-contained HTML document
+(inline `<style>`, no external assets — `xhtml2pdf` doesn't reliably fetch
+remote fonts/CSS) from the exact same report shape the frontend already
+renders: per-company sections with claims/sources/caveats, conflicts
+flagged, the `comparison` table *or* the `portfolio` breakdown (whichever
+the report has), overall caveats, a footer. `render_report_pdf(report) ->
+bytes` pipes that through `xhtml2pdf.pisa.CreatePDF`.
+
+**A real gap this surfaced**: the PDF's base font (Helvetica, one of the
+standard 14 PDF fonts — no embedding, so nothing to bundle/license) only
+covers WinAnsi/Latin-1. Groq output routinely carries characters outside
+that range — Unicode hyphens (the same quirk `agents/README.md`'s Filings
+Agent notes already documented), curly quotes, and the ₹ rupee sign, which
+is core content in an equity-research report, not an edge case. Confirmed
+these render as blank boxes unless normalized first; `report_pdf.py`'s
+`_sanitize()` maps them to ASCII-safe equivalents (₹ → "Rs. ", smart quotes
+→ straight, any Unicode dash → `-`/`--`) before anything reaches the PDF.
+Verified against real reports (single-company, comparison, and portfolio
+shapes) — no missing glyphs, multi-page layout holds up.
 
 ## Persistence — `research_jobs`, `filing_upload_jobs`, `followup_turns`
 

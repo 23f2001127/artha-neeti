@@ -95,6 +95,7 @@ The Groq-for-reasoning / Gemini-for-classification-and-embeddings split is delib
 | Real progress (routing live, per-tool-call stages, historical ETA) | ✅ built — no more static spinner or hardcoded time estimate; see `app/README.md`'s "How live progress works" |
 | Follow-up conversational queries | ✅ built — cheap synchronous answers grounded in a finished report, escalating to a real Planner run only when asked; see `app/README.md`'s "Follow-up conversations" |
 | Portfolio-level analysis | ✅ built — a new Planner mode for "I hold X and Y" style questions: weighted P/E/ROE/dividend yield and sector allocation computed in code, diversification/concentration reasoning in one LLM call; see `agents/README.md`'s "portfolio node" |
+| UI/branding polish (social-share preview, favicon completion, keyboard focus, example-reports gallery, real PDF export) | ✅ built — see `frontend/README.md`'s "Brand assets" + `app/README.md`'s "PDF export" |
 | Deployment | ⬜ not started |
 
 Each component has its own README with the design decisions, test evidence, and known limitations (`mcp_servers/*/README.md`, `agents/README.md`, `shared/README.md`). The agent tests are runnable scripts that print full reasoning traces and structured output, not just pass/fail.
@@ -206,7 +207,11 @@ python shared/test_llm_rate_limiter.py
       different lens than a head-to-head comparison: weighted valuation
       metrics and sector allocation computed in code, diversification/
       concentration reasoning in the LLM, explicitly not a quant risk model
-- [ ] UI/branding polish pass
+- [x] UI/branding polish pass — social-share preview (OG image + meta
+      tags), completed favicon (PNG fallbacks, apple-touch-icon, web
+      manifest), keyboard-focus visibility, a curated example-reports
+      gallery on the landing page, and a real generated PDF download
+      (pure-Python `xhtml2pdf`, not a print dialog)
 - [ ] Deployment
 
 ---

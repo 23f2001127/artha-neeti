@@ -31,12 +31,13 @@ import logging
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from agents.filings_agent import ingested_tickers
 from app import db, filings, followups, jobs
+from app.report_pdf import render_report_pdf
 from shared import llm_rate_limiter as rl
 
 logging.basicConfig(level=logging.INFO)
@@ -90,6 +91,7 @@ def root() -> dict:
         "docs": "/docs",
         "endpoints": [
             "POST /research", "GET /research/{job_id}", "GET /research/{job_id}/report",
+            "GET /research/{job_id}/report.pdf",
             "POST /research/{job_id}/followups", "GET /research/{job_id}/followups",
             "POST /research/{job_id}/followups/escalate",
             "GET /companies", "POST /filings/upload", "POST /filings/fetch",
@@ -168,6 +170,31 @@ async def get_report(job_id: uuid.UUID) -> dict:
     if row["status"] not in ("done", "error") or row["report"] is None:
         raise HTTPException(status_code=409, detail=f"job is '{row['status']}', report not ready")
     return row["report"]
+
+
+@app.get("/research/{job_id}/report.pdf")
+async def get_report_pdf(job_id: uuid.UUID) -> Response:
+    """The finished report as a downloadable PDF - agents/report_pdf.py
+    renders the same report dict GET .../report returns into a document via
+    xhtml2pdf (pure Python, no system dependency - see app/README.md)."""
+    row = await asyncio.to_thread(db.get_job, str(job_id))
+    if row is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    if row["status"] not in ("done", "error") or row["report"] is None:
+        raise HTTPException(status_code=409, detail=f"job is '{row['status']}', report not ready")
+    try:
+        pdf_bytes = await asyncio.to_thread(render_report_pdf, row["report"])
+    except Exception as exc:  # noqa: BLE001 - a rendering bug must not 500 opaquely
+        log.exception("PDF render failed for job %s", job_id)
+        raise HTTPException(status_code=500, detail=f"could not render PDF: {exc}") from exc
+
+    tickers = list((row["report"].get("reports") or {}).keys())
+    slug = "-".join(t.lower() for t in tickers) or "report"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="arthaneeti-{slug}.pdf"'},
+    )
 
 
 @app.post("/research/{job_id}/followups")

@@ -25,10 +25,21 @@ no axios, no query-caching library — polling a single job doesn't need one.
   live-looking agent-pipeline diagram (`HeroDiagram`, self-cycling), count-up
   stats pulled from the real corpus (10 companies, 3,980 cited excerpts, 3
   specialists, 11 tools), a 4-step "how it works" tied to the actual Planner
-  graph (route → gather → synthesize → compare), and a feature grid naming the
+  graph (route → gather → synthesize → compare), a feature grid naming the
   real differentiators (selective routing, conflict surfacing, filings
-  grounding, live transparency) — everything on this page is a true claim about
-  what the system does, not marketing filler.
+  grounding, live transparency), and `ExampleGallery` — two real completed
+  reports (a full single-company view with a genuine cross-specialist
+  conflict, and a portfolio analysis) a visitor can open without typing
+  anything. Curated by hand (`FEATURED` in `ExampleGallery.jsx` — two
+  `job_id`s + a tagline written for presentation), not a database "featured"
+  flag — deliberately the simplest thing that works for two entries; each
+  card fetches its real job via the same public `GET /research/{job_id}`
+  everything else uses, with a skeleton while loading and quiet
+  self-removal if a fetch ever fails. "View full report" reuses the exact
+  `?job=` deep-link mechanism a shared link already uses — `App.jsx`'s
+  `onViewJob` is the same `setJobId` transition `onEscalate` uses elsewhere.
+  Everything on this page is a true claim about what the system does, not
+  marketing filler.
 - **Query** (`components/query/`) — the input, example-query chips, and a
   coverage strip from `GET /companies` distinguishing full coverage (all three
   specialists) from partial (market data + news only). A best-effort client-side
@@ -83,7 +94,30 @@ no axios, no query-caching library — polling a single job doesn't need one.
   `standalone_query` to a real Planner run — `App.jsx`'s `onEscalate` just
   calls `setJobId(newJobId)`, the exact same transition `handleSubmit` already
   does after `POST /research`, so the whole progress → report flow works
-  unchanged for it.
+  unchanged for it. "Download PDF" (next to "Copy link") hits
+  `GET /research/{job_id}/report.pdf` and saves a real generated document —
+  see `app/README.md` for how that's rendered server-side.
+
+## Brand assets (favicon, social-share preview)
+
+`public/favicon.svg` is the source of truth for the mark (also inlined in
+`Header.jsx`). Everything else derives from it and from
+`scripts/og-image.svg` via `scripts/generate-brand-assets.mjs` (`sharp`, a
+devDependency — pure rasterization, no build-time cost since it's not part
+of `npm run build`):
+
+```bash
+node scripts/generate-brand-assets.mjs
+```
+
+Regenerates `public/og-image.png` (1200×630, the social-share card —
+`index.html`'s `og:image`/`twitter:image`, referenced as a **relative**
+path so it resolves correctly at whatever domain this ends up deployed at)
+and the favicon PNG fallbacks (`favicon-16.png`, `favicon-32.png`,
+`apple-touch-icon.png`, `icon-512.png` — the SVG favicon covers modern
+browsers on its own; these are for bookmarks, mobile "add to home screen",
+and `site.webmanifest`). Re-run it whenever `favicon.svg` or
+`scripts/og-image.svg` changes — nothing else needs to.
 
 ## Routing renders off the structured decision, not parsed log lines
 
@@ -132,6 +166,10 @@ reveals and count-up stats, spring-eased status badges, and the live agent-graph
 edges). All of it is tied to real state — the graph in the progress view is not
 a decorative loop, it reflects the actual `specialist_status` coming back from
 the poll.
+
+A global `:focus-visible` ring (`index.css`, brand-colored, themes correctly
+in both modes) makes Tab-navigation visible — it only fires for keyboard
+focus, not a mouse click, so nothing changes for a mouse user.
 
 ## Running
 

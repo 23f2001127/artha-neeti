@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <pattern id="grid" width="44" height="44" patternUnits="userSpaceOnUse">
+      <path d="M 44 0 L 0 0 0 44" fill="none" stroke="#232a25" stroke-width="1"/>
+    </pattern>
+    <radialGradient id="veil" cx="30%" cy="35%" r="75%">
+      <stop offset="0%" stop-color="#0a0d0b" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#0a0d0b" stop-opacity="1"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1200" height="630" fill="#0a0d0b"/>
+  <rect width="1200" height="630" fill="url(#grid)"/>
+  <rect width="1200" height="630" fill="url(#veil)"/>
+
+  <!-- mark -->
+  <g transform="translate(120, 175)">
+    <rect width="120" height="120" rx="26" fill="#12332C"/>
+    <path d="M34 84 L58 34 L84 84" stroke="#E8B85C" stroke-width="8" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
+    <path d="M43.5 65 H73.5" stroke="#E8B85C" stroke-width="8" stroke-linecap="round"/>
+  </g>
+
+  <text x="120" y="370" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="72" font-weight="700" fill="#EDEEEA">ArthaNeeti</text>
+  <text x="122" y="420" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="28" font-weight="400" fill="#9BA39C">Multi-agent Indian equity research</text>
+
+  <!-- pipeline motif -->
+  <g font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="500">
+    <g transform="translate(122, 470)">
+      <circle cx="0" cy="0" r="5" fill="#34C795"/>
+      <text x="16" y="5" fill="#62695F">ROUTE</text>
+      <line x1="82" y1="0" x2="150" y2="0" stroke="#37413A" stroke-width="2" stroke-dasharray="3 5"/>
+      <circle cx="166" cy="0" r="5" fill="#34C795"/>
+      <text x="182" y="5" fill="#62695F">GATHER</text>
+      <line x1="252" y1="0" x2="320" y2="0" stroke="#37413A" stroke-width="2" stroke-dasharray="3 5"/>
+      <circle cx="336" cy="0" r="5" fill="#34C795"/>
+      <text x="352" y="5" fill="#62695F">SYNTHESIZE</text>
+      <line x1="464" y1="0" x2="532" y2="0" stroke="#37413A" stroke-width="2" stroke-dasharray="3 5"/>
+      <circle cx="548" cy="0" r="5" fill="#E8B85C"/>
+      <text x="564" y="5" fill="#62695F">COMPARE</text>
+    </g>
+  </g>
+</svg>
