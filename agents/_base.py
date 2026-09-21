@@ -40,14 +40,20 @@ from shared import llm_rate_limiter as rl  # noqa: E402
 
 REPO_ROOT = _REPO_ROOT
 
-# Groq reasoning models, primary + fallbacks. Each has its own free-tier bucket
-# (~950 req/day; ~5k tokens/min measured - the token cap binds), so rotation
-# headroom. llama-3.3-70b was retired on Groq; gpt-oss-120b is the current large
-# general reasoner. gemma2-9b-it gets a much higher per-model TPM (15k vs ~8k)
-# at a smaller 8k context - a good last-inside-Groq rung for shorter steps.
-# GROQ_AGENT_MODEL overrides the primary.
+# Groq reasoning models, primary + fallbacks. gpt-oss-120b/qwen3.8-27b/
+# gpt-oss-20b each carry 1000 req/day, 8k TPM (live-checked via response
+# headers). llama-3.3-70b was retired on Groq; gpt-oss-120b is the current
+# large general reasoner. gemma2-9b-it (the previous last rung) was itself
+# decommissioned by Groq - confirmed live via a 400 "has been decommissioned"
+# error, not just docs (and llama-3.1-8b-instant, an initially plausible
+# replacement, turned out to 404 on this account's actual model list - Groq's
+# docs and an account's real access don't always agree, so this was checked
+# against `client.models.list()`, not assumed). allam-2-7b replaces it: a
+# genuinely separate quota bucket (7000 req/day, 6000 TPM, live-checked) and
+# confirmed both listed active and working end to end. GROQ_AGENT_MODEL
+# overrides the primary.
 DEFAULT_MODEL = os.environ.get("GROQ_AGENT_MODEL", "openai/gpt-oss-120b")
-FALLBACK_MODELS = ("qwen/qwen3.8-27b", "openai/gpt-oss-20b", "gemma2-9b-it")
+FALLBACK_MODELS = ("qwen/qwen3.8-27b", "openai/gpt-oss-20b", "allam-2-7b")
 RECURSION_LIMIT = 16
 
 
