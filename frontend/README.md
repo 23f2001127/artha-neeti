@@ -63,9 +63,19 @@ no axios, no query-caching library — polling a single job doesn't need one.
   visual weight to the summary rather than buried), `SourcesPanel` (a
   references-style list from `sources_by_claim`), `CaveatsPanel` (collapsed by
   default so it's present but doesn't compete with the findings), for
-  multi-company queries `ComparisonView` (verdict + a dimension table), and
-  `FollowUpPanel` — a small chat under the report for asking a follow-up
-  without re-running anything: `POST .../followups` answers synchronously
+  multi-company queries either `ComparisonView` (verdict + a dimension table,
+  when the query asked "which is better") or `PortfolioView` (when it framed
+  the companies as holdings — `report.portfolio` vs `report.comparison` are
+  mutually exclusive, and each component no-ops on the field it doesn't get):
+  a weight-allocation bar and a sector-allocation bar (both fixed-order
+  categorical color, direct-labeled — validated with the `dataviz` skill's
+  palette checker against both themes, see `index.css`'s `--chart-cat-*`
+  tokens), three weighted-metric stat tiles (P/E, ROE, dividend yield —
+  computed server-side in plain arithmetic, never LLM-estimated), the
+  diversification narrative, and `concentration_risks` in the same warmer
+  tension-first treatment `ConflictsPanel` uses for cross-specialist
+  conflicts. Below all of that, `FollowUpPanel` — a small chat under the
+  report for asking a follow-up without re-running anything: `POST .../followups` answers synchronously
   (no polling, it's one fast LLM call) and renders as a normal Q&A bubble
   pair. When the report doesn't cover what was asked, the turn instead shows
   why (`missing_reason`) and a "Run full research on this" button

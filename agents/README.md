@@ -347,7 +347,7 @@ than guessing - an honest scope limit, not a bug.
 A LangGraph `StateGraph` that turns a raw question into the full pipeline:
 
 ```
-START → route → (gather → synthesize → [compare]) → finalize → END
+START → route → (gather → synthesize → [compare|portfolio]) → finalize → END
 ```
 
 ```python
@@ -360,7 +360,8 @@ result = plan_sync("give me a complete research view on TCS")
 | **route** | one Groq call → which compan(ies) (resolved to NSE tickers), single vs multi, and **which of the 3 specialists each company actually needs** — selective, with a stated reason for every skip. Tickers are confirmed on yfinance (`fast_info`, existence only — the one place the Planner touches yfinance; known large-caps skip the lookup). Filings is skipped up front for any company outside the current filings RAG corpus (`filings_agent.ingested_tickers()` — DB-backed, so an upload/auto-fetch mid-session is picked up without a restart; see `mcp_servers/filings_rag_mcp`). |
 | **gather** | runs the selected specialists as a bounded-concurrency fan-out over the (company × specialist) matrix. Each is the existing agent via its own `run` coroutine — nothing reimplemented. Each call also gets an `on_stage` callback (see `_base.run_agent`) that pushes short live-progress strings ("calling get_quote...", "thinking...", "writing summary...") into `specialist_status`, so a polling client sees per-tool-call granularity instead of one static "running" for the whole call. A specialist that errors becomes `{"error": …}` in that cell, not a crash. |
 | **synthesize** | one `synthesis_agent.synthesize` call per company over whatever cells came back — its proven Case-2 partial handling does the rest. |
-| **compare** | multi-company only: a light Groq call over the *finished* per-company reports → `{verdict, dimensions[], caveats[]}`. |
+| **compare** | multi-company only, when the router flagged `is_comparison`: a light Groq call over the *finished* per-company reports → `{verdict, dimensions[], caveats[]}`. |
+| **portfolio** | multi-company only, when the router flagged `is_portfolio` instead — mutually exclusive with **compare**. See below. |
 | **finalize** | assembles the output incl. the full routing rationale. |
 
 **Multi-company design:** per-company full pipeline (specialists + synthesis)
@@ -392,16 +393,19 @@ whole run is `done`:
      "specialists_skipped":  [{"specialist", "reason"}],   # a real reason per skip
      "sub_queries": {ticker: {specialist: "..."}},
      "rationale": "...",                                    # the router LLM's own paragraph
+     "is_portfolio": bool,           # true -> "portfolio" node runs instead of "compare"
+     "weights_note": "..." | None,    # how weight_pct was resolved (given+normalized, or defaulted equal)
      "companies_identified": [{
          "name", "ticker", "resolvable", "resolution_note", "in_filings_corpus",
          "specialists": [{"specialist", "selected": bool, "reason"}],   # PER-COMPANY breakdown -
-     }],                                                                # a multi-company query can
-                                                                         # route each company differently
+         "weight_pct": float | None,                                    # a multi-company query can
+     }],                                                                # route each company differently
   },
   "routing_trace": [ "company 'X' -> X.NS: RESOLVABLE ...", "  -> X: skip filings - not one of the ingested corpus", ... ],
   "graph_path": ["route: ...", "gather: 3/3 ok ...", "synthesize: ...", "finalize"],
   "reports": {ticker: <full synthesis report>},
   "comparison": {...} | None,
+  "portfolio": {...} | None,        # mutually exclusive with comparison - see "portfolio node" below
   "specialist_status": {ticker: {specialist: "pending" | "<live stage text>" | "ok" | "error: ..."}},
 }
 ```
@@ -410,6 +414,43 @@ whole run is `done`:
 for the frontend's optional "show full trace" toggle - but `routing` is the
 structured version a UI should actually render against; nothing needs to
 parse trace lines back into structure anymore.
+
+### The `portfolio` node — weighted math in code, reasoning in the LLM
+
+Reached instead of `compare` when the router sets `is_portfolio` - a set of
+holdings the user owns (or is considering) together, asked about as
+diversification/concentration/allocation rather than "which one wins". Two
+things happen, deliberately kept apart:
+
+1. **Weight resolution (`_route_node`, before any specialist runs)** - if
+   every holding got an explicit `weight_pct` from the router (percentages, a
+   stated split, "roughly equal amounts"), they're normalized to sum to 100;
+   if even one is missing, the **whole set** is equal-weighted instead of
+   mixing given and defaulted values, and `routing.weights_note` says so
+   plainly ("not fully specified - treated as equal-weighted"). Never a
+   silent assumption.
+2. **`_portfolio_node` (after synthesis, same graph position as `compare`)**
+   computes weighted-average P/E, ROE, and dividend yield, plus a sector-
+   allocation breakdown, **in plain Python arithmetic** on real numbers - it
+   scans `specialist_outputs[ticker]["market_data"]["raw_data"]` for
+   `sector`/`pe_ratio`/`roe`/`dividend_yield_pct` (flat top-level keys on both
+   `get_fundamentals` and `get_ratios`' responses, so this works regardless of
+   which specific tool the ReAct loop happened to call). Only the qualitative
+   half - `narrative`, `diversification`, `concentration_risks`, `caveats` -
+   is one structured-output LLM call (`_PortfolioAssessment`,
+   `_PORTFOLIO_PROMPT`), given the computed numbers plus each holding's
+   already-synthesized report. The split matters: weighted averages are
+   arithmetic, and letting an LLM "compute" them risks sloppy rounding or
+   outright hallucination on something that has one correct answer.
+
+**Explicitly out of scope, and said so in every `caveats` list**: this is a
+*composition* read (weights + sectors + valuation mix), not a quantitative
+risk model. Real correlation/beta/volatility analysis needs historical
+return time-series data `market_data_mcp` doesn't fetch today - a materially
+bigger data-layer addition, not something `_portfolio_node` pretends to
+approximate. `_PORTFOLIO_PROMPT` explicitly forbids implying the holdings'
+returns have been shown to move together ("same sector" / "similar risk
+drivers", never "correlated" in the statistical sense).
 
 ### Test
 

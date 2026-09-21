@@ -51,6 +51,19 @@
   --color-info: #5b9bd5;
   --color-info-tint: rgba(91, 155, 213, 0.14);
 
+  /* Categorical chart series (portfolio holdings/sector allocation) - a fixed
+     hue order, NOT reused for status meaning. Validated with the dataviz
+     skill's palette validator against this theme's surface (#121613):
+     lightness band, chroma floor, CVD adjacent-pair separation (worst ΔE 8.4
+     protan/8.7 tritan), normal-vision floor (worst ΔE 19.3), contrast >=3:1 -
+     all pass. Re-validate before reordering or adding a 7th/8th slot. */
+  --chart-cat-1: #3987e5; /* blue */
+  --chart-cat-2: #d95926; /* orange */
+  --chart-cat-3: #199e70; /* aqua */
+  --chart-cat-4: #c98500; /* yellow */
+  --chart-cat-5: #d55181; /* magenta */
+  --chart-cat-6: #008300; /* green */
+
   /* Deliberately constant across both themes - a tooltip is always an
      inverted chip (dark bg, light text), never re-derived from --color-ink
      (which flips and would go near-invisible in dark mode). */
@@ -99,6 +112,17 @@
 
   --color-info: #2b5a86;
   --color-info-tint: #eaf0f7;
+
+  /* Same 6 categorical slots, light-mode steps - validated against this
+     theme's surface (#ffffff): 3 slots (aqua/yellow/magenta) sit below 3:1
+     contrast by design (the palette's documented relief rule) - components
+     using these MUST carry a visible direct label, never color alone. */
+  --chart-cat-1: #2a78d6;
+  --chart-cat-2: #eb6834;
+  --chart-cat-3: #1baf7a;
+  --chart-cat-4: #eda100;
+  --chart-cat-5: #e87ba4;
+  --chart-cat-6: #008300;
 
   --shadow-card: 0 1px 2px rgba(24, 26, 23, 0.04), 0 1px 1px rgba(24, 26, 23, 0.03);
   --glow-brand: 0 0 0 1px rgba(18, 51, 44, 0.1);

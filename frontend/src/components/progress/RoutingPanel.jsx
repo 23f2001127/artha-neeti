@@ -36,6 +36,11 @@ function CompanyRouting({ c }) {
         <span className="mono text-[11px] px-1.5 py-0.5 rounded bg-[var(--color-surface-muted)] text-[var(--color-ink-muted)]">
           {c.ticker}.NS
         </span>
+        {c.weight_pct != null && (
+          <span className="mono text-[10.5px] px-1.5 py-0.5 rounded-full bg-[var(--color-brand-tint)] text-[var(--color-brand)]">
+            {c.weight_pct}% of portfolio
+          </span>
+        )}
         <span
           className={`text-[10.5px] px-1.5 py-0.5 rounded-full ${
             c.resolvable ? "bg-[var(--color-ok-tint)] text-[var(--color-ok)]" : "bg-[var(--color-error-tint)] text-[var(--color-error)]"

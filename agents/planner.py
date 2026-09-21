@@ -134,6 +134,11 @@ _KNOWN_NSE = frozenset({
 class _RoutedCompany(BaseModel):
     name: str = Field(description="company display name")
     ticker: str = Field(description="NSE ticker symbol, NO exchange suffix (RELIANCE, TCS, INFY, M&M, SBIN)")
+    weight_pct: float | None = Field(
+        default=None,
+        description="this holding's stated/implied portfolio weight, 0-100 (e.g. from '60% X, 40% Y' or "
+        "'a 60-40 split'). Null if this isn't a portfolio question or no weight was given for it.",
+    )
 
 
 class _SpecialistRoute(BaseModel):
@@ -146,6 +151,12 @@ class _SpecialistRoute(BaseModel):
 class _RoutingDecision(BaseModel):
     companies: list[_RoutedCompany]
     is_comparison: bool = Field(description="true if the user wants 2+ companies compared or ranked")
+    is_portfolio: bool = Field(
+        description="true if the user is asking about a set of holdings they OWN (or are considering "
+        "owning) together as one portfolio - diversification, concentration, overall allocation/risk - "
+        "rather than a head-to-head 'which is better' comparison. Mutually exclusive with is_comparison "
+        "in practice: a portfolio question isn't asking which holding wins."
+    )
     routes: list[_SpecialistRoute] = Field(
         description="exactly three entries - market_data, news_sentiment, filings"
     )
@@ -157,10 +168,19 @@ research system. Given a user's question you decide how to dispatch it - you do 
 NOT answer it.
 
 Return:
-- companies: every company the question is about, each with a display name and its \
+- companies: every company the question is about, each with a display name, its \
 NSE ticker symbol WITHOUT any exchange suffix (RELIANCE, TCS, INFY, M&M, HDFCBANK, \
-SBIN, ...). Empty list if the question names no company.
-- is_comparison: true if the user wants two or more companies compared or ranked.
+SBIN, ...), and weight_pct if this is a portfolio question (see below). Empty list \
+if the question names no company.
+- is_comparison: true if the user wants two or more companies compared or ranked \
+head-to-head ("which is the better buy", "how does X stack up against Y").
+- is_portfolio: true if the user is asking about holdings they own (or are \
+considering) TOGETHER as one portfolio - diversification, concentration, overall \
+allocation or risk ("I hold X and Y, am I diversified?", "is my portfolio of A, B, \
+C too concentrated?"). If true, extract weight_pct (0-100) for each holding from \
+whatever the user stated - explicit percentages, a ratio/split ("60-40"), or "roughly \
+equal amounts". Leave weight_pct null for a holding whose weight genuinely wasn't \
+given - do not invent a number. Never true at the same time as is_comparison.
 - routes: EXACTLY three entries - one each for market_data, news_sentiment, \
 filings. For each: relevant (bool), a short reason, and if relevant a \
 company-agnostic sub_query naming what to fetch.
@@ -168,7 +188,8 @@ company-agnostic sub_query naming what to fetch.
 When each specialist is relevant:
 - market_data: price, valuation, multiples (P/E), ratios (ROE, margins, debt), \
 returns, "how is X valued", "is X cheap/expensive", any comparison of financial \
-metrics.
+metrics. For a portfolio question, market_data is almost always relevant - sector, \
+valuation, and profitability are what a diversification/concentration read is built on.
 - news_sentiment: recent news, "what's happening with X", market sentiment / mood, \
 analyst reactions, dividend / buyback / earnings-date / M&A announcements.
 - filings: what the company itself disclosed in its latest annual report - risk \
@@ -218,6 +239,44 @@ speak to)."""
 
 
 # --------------------------------------------------------------------------- #
+# portfolio LLM schema (multi-company, is_portfolio routing)
+# --------------------------------------------------------------------------- #
+class _PortfolioAssessment(BaseModel):
+    narrative: str = Field(description="2-5 sentences on this portfolio's overall composition and risk profile")
+    diversification: str = Field(
+        description="how spread out vs concentrated the holdings are, by sector AND by weight - name the sectors"
+    )
+    concentration_risks: list[str] = Field(
+        description="specific concentration or correlated-risk concerns (a dominant sector, a single oversized "
+        "weight, holdings that would likely move together); empty list ONLY if genuinely well spread"
+    )
+    caveats: list[str] = Field(
+        description="incl. that this is a composition/valuation-mix read, NOT a quantitative risk model - no "
+        "correlation, volatility, or historical-return data is used - plus any caveat the per-company reports carried"
+    )
+
+
+_PORTFOLIO_PROMPT = """You are ArthaNeeti's portfolio-analysis step. You are given \
+a set of holdings (each with a resolved weight_pct and its own FINISHED research \
+report, already reconciled from its specialists), plus already-computed weighted \
+metrics and sector allocation. Assess the portfolio AS A WHOLE.
+
+Rules:
+- This is a composition read, not a quant risk model: you have weights, sectors, \
+and valuation/profitability metrics - NOT historical returns, correlation, or \
+volatility. Never imply you've measured how the holdings move together; say "the \
+same sector" or "similar risk drivers", not "correlated" in the statistical sense.
+- diversification: name the actual sectors and their weight - "consumer staples \
+(60%) and banking (40%)" not just "moderately diversified".
+- concentration_risks: a genuinely concentrated portfolio (one sector >50%, one \
+holding dominating the weight, or several holdings sharing the same risk driver - \
+e.g. all rate-sensitive, all export-dependent) must say so plainly. A well-spread \
+one gets an empty list, not a manufactured concern.
+- Carry forward any real caveat the per-company reports flagged (data-vintage gaps, \
+thin sentiment samples, filings coverage gaps) that bears on trusting this read."""
+
+
+# --------------------------------------------------------------------------- #
 # state
 # --------------------------------------------------------------------------- #
 class PlannerState(TypedDict, total=False):
@@ -234,6 +293,7 @@ class PlannerState(TypedDict, total=False):
     specialist_status: dict      # {ticker: {specialist: "ok" | "error: ..."}}
     reports: dict                # {ticker: synthesis report}
     comparison: dict
+    portfolio: dict
     # transparency
     graph_path: Annotated[list[str], operator.add]
     errors: Annotated[list[str], operator.add]
@@ -317,7 +377,7 @@ async def _route_node(state: PlannerState) -> dict:
         companies_out.append({
             "name": rc.name, "ticker": base, "nse_symbol": f"{base}.NS" if base else None,
             "resolvable": resolvable, "resolution_note": note, "in_filings_corpus": in_corpus,
-            "specialists": specialist_decisions,
+            "specialists": specialist_decisions, "weight_pct": rc.weight_pct,
         })
         trace.append(
             f"company {rc.name!r} -> {base}.NS: "
@@ -360,6 +420,30 @@ async def _route_node(state: PlannerState) -> dict:
     mode = "multi" if len(plan) >= 2 else ("single" if len(plan) == 1 else "none")
     selected = sorted({sp for per in plan.values() for sp in per})
 
+    weights_note: str | None = None
+    if decision.is_portfolio and mode == "multi":
+        # Only holdings that actually made it into the plan count toward
+        # portfolio weight - a dropped/unresolvable company isn't part of it.
+        held = [c for c in companies_out if c["ticker"] in plan]
+        given = [c["weight_pct"] for c in held if c["weight_pct"] is not None]
+        if len(given) == len(held) and sum(given) > 0:
+            total = sum(given)
+            for c in held:
+                c["weight_pct"] = round(c["weight_pct"] / total * 100, 2)
+            weights_note = f"weights as given, normalized to sum to 100 (raw sum was {total:.1f})"
+        else:
+            # Any missing weight -> equal-weight the whole set, rather than mix
+            # given and defaulted values (which would misrepresent the mix).
+            eq = round(100 / len(held), 2)
+            for c in held:
+                c["weight_pct"] = eq
+            weights_note = (
+                "not fully specified - treated as equal-weighted"
+                if given else "not specified - treated as equal-weighted"
+            )
+        weights_desc = ", ".join(f"{c['ticker']}={c['weight_pct']}%" for c in held)
+        trace.append(f"portfolio weights: {weights_note} ({weights_desc})")
+
     skipped: list[dict] = []
     for sp in SPECIALISTS:
         if sp in selected:
@@ -384,10 +468,12 @@ async def _route_node(state: PlannerState) -> dict:
     routing = {
         "companies_identified": [
             {k: c[k] for k in
-             ("name", "ticker", "resolvable", "resolution_note", "in_filings_corpus", "specialists")}
+             ("name", "ticker", "resolvable", "resolution_note", "in_filings_corpus", "specialists", "weight_pct")}
             for c in companies_out
         ],
         "is_comparison": decision.is_comparison,
+        "is_portfolio": decision.is_portfolio,
+        "weights_note": weights_note,
         "mode": mode,
         "specialists_selected": selected,
         "specialists_skipped": skipped,
@@ -487,7 +573,9 @@ async def _synthesize_node(state: PlannerState) -> dict:
 
 def _after_synth(state: PlannerState) -> str:
     good = [t for t, r in state.get("reports", {}).items() if "error" not in r]
-    return "compare" if state.get("mode") == "multi" and len(good) >= 2 else "finalize"
+    if state.get("mode") == "multi" and len(good) >= 2:
+        return "portfolio" if state.get("routing", {}).get("is_portfolio") else "compare"
+    return "finalize"
 
 
 async def _compare_node(state: PlannerState) -> dict:
@@ -532,6 +620,104 @@ async def _compare_node(state: PlannerState) -> dict:
     }
 
 
+def _extract_field(raw_data: dict | None, key: str, types: tuple) -> Any:
+    """Scan every tool result in one specialist's raw_data for `key` at the top
+    level, return the first match. Both get_fundamentals and get_ratios return
+    sector/pe_ratio/roe/dividend_yield_pct as flat keys, so this doesn't need
+    to know which specific tool the ReAct loop happened to call."""
+    for result in (raw_data or {}).values():
+        if isinstance(result, dict) and isinstance(result.get(key), types):
+            return result[key]
+    return None
+
+
+def _weighted_avg(rows: list[dict], weight_key: str, value_key: str) -> float | None:
+    pts = [(r[weight_key], r[value_key]) for r in rows if isinstance(r.get(value_key), (int, float))]
+    wsum = sum(w for w, _ in pts)
+    return round(sum(w * v for w, v in pts) / wsum, 2) if wsum else None
+
+
+async def _portfolio_node(state: PlannerState) -> dict:
+    model_name = state.get("model_name", DEFAULT_MODEL)
+    reports: dict = state.get("reports", {})
+    specialist_outputs: dict = state.get("specialist_outputs", {})
+    companies = {c["ticker"]: c for c in state.get("companies", [])}
+
+    holdings = [
+        {"ticker": t, "name": companies.get(t, {}).get("name", t), "weight_pct": companies.get(t, {}).get("weight_pct")}
+        for t in reports if "error" not in reports[t] and companies.get(t, {}).get("weight_pct") is not None
+    ]
+    if len(holdings) < 2:
+        return {"graph_path": ["portfolio: skipped (fewer than 2 weighted, usable holdings)"]}
+
+    metrics_missing: list[str] = []
+    for h in holdings:
+        md_raw = ((specialist_outputs.get(h["ticker"]) or {}).get("market_data") or {}).get("raw_data")
+        h["sector"] = _extract_field(md_raw, "sector", (str,))
+        h["pe_ratio"] = _extract_field(md_raw, "pe_ratio", (int, float))
+        # get_ratios returns roe as a FRACTION (0.15 == 15%, see market_data.py's
+        # own notes), unlike dividend_yield_pct which is already a percentage -
+        # normalize here so weighted_roe is a percentage too, consistent with
+        # weighted_dividend_yield_pct and the frontend's shared "%" suffix.
+        roe_fraction = _extract_field(md_raw, "roe", (int, float))
+        h["roe"] = round(roe_fraction * 100, 2) if roe_fraction is not None else None
+        h["dividend_yield_pct"] = _extract_field(md_raw, "dividend_yield_pct", (int, float))
+        if md_raw is None:
+            metrics_missing.append(h["ticker"])
+
+    sector_allocation: dict[str, float] = {}
+    for h in holdings:
+        if h["sector"]:
+            sector_allocation[h["sector"]] = round(sector_allocation.get(h["sector"], 0) + h["weight_pct"], 2)
+
+    computed = {
+        "holdings": [
+            {"ticker": h["ticker"], "name": h["name"], "weight_pct": h["weight_pct"], "sector": h["sector"],
+             "pe_ratio": h["pe_ratio"], "roe": h["roe"], "dividend_yield_pct": h["dividend_yield_pct"]}
+            for h in holdings
+        ],
+        "weighted_pe_ratio": _weighted_avg(holdings, "weight_pct", "pe_ratio"),
+        "weighted_roe": _weighted_avg(holdings, "weight_pct", "roe"),
+        "weighted_dividend_yield_pct": _weighted_avg(holdings, "weight_pct", "dividend_yield_pct"),
+        "sector_allocation_pct": sector_allocation,
+        "metrics_unavailable_for": metrics_missing,
+    }
+
+    digest = [
+        {
+            "ticker": h["ticker"], "weight_pct": h["weight_pct"],
+            "executive_summary": reports[h["ticker"]].get("executive_summary"),
+            "overall_caveats": reports[h["ticker"]].get("overall_caveats"),
+            "conflicts_flagged": reports[h["ticker"]].get("conflicts_flagged"),
+        }
+        for h in holdings
+    ]
+
+    model = _base.make_model(model_name)
+    assessment: _PortfolioAssessment = await model.with_structured_output(_PortfolioAssessment).ainvoke([
+        _base.SystemMessage(_PORTFOLIO_PROMPT),
+        _base.HumanMessage(
+            f"ORIGINAL USER QUERY:\n{state['query']}\n\n"
+            f"COMPUTED WEIGHTED METRICS + SECTOR ALLOCATION (JSON):\n{json.dumps(computed, indent=2, default=str)}\n\n"
+            f"PER-HOLDING REPORTS (JSON):\n{json.dumps(digest, indent=2, default=str)}"
+        ),
+    ])
+    if isinstance(assessment, dict):
+        assessment = _PortfolioAssessment(**assessment)
+
+    return {
+        "portfolio": {
+            **computed,
+            "narrative": assessment.narrative,
+            "diversification": assessment.diversification,
+            "concentration_risks": assessment.concentration_risks,
+            "caveats": assessment.caveats,
+        },
+        "graph_path": [f"portfolio: {len(holdings)} holdings, "
+                        f"{len(sector_allocation)} sector(s), {len(assessment.concentration_risks)} concern(s)"],
+    }
+
+
 def _finalize_node(state: PlannerState) -> dict:
     final = {
         "query": state["query"],
@@ -541,6 +727,7 @@ def _finalize_node(state: PlannerState) -> dict:
         "routing_trace": state.get("routing_trace", []),
         "reports": state.get("reports", {}),
         "comparison": state.get("comparison"),
+        "portfolio": state.get("portfolio"),
         "specialist_status": state.get("specialist_status", {}),
         "graph_path": state.get("graph_path", []) + ["finalize"],
         "errors": state.get("errors", []),
@@ -561,13 +748,17 @@ def _build_graph():
     g.add_node("gather", _gather_node)
     g.add_node("synthesize", _synthesize_node)
     g.add_node("compare", _compare_node)
+    g.add_node("portfolio", _portfolio_node)
     g.add_node("finalize", _finalize_node)
 
     g.add_edge(START, "route")
     g.add_conditional_edges("route", _after_route, {"gather": "gather", "finalize": "finalize"})
     g.add_edge("gather", "synthesize")
-    g.add_conditional_edges("synthesize", _after_synth, {"compare": "compare", "finalize": "finalize"})
+    g.add_conditional_edges(
+        "synthesize", _after_synth, {"compare": "compare", "portfolio": "portfolio", "finalize": "finalize"}
+    )
     g.add_edge("compare", "finalize")
+    g.add_edge("portfolio", "finalize")
     g.add_edge("finalize", END)
     return g.compile()
 

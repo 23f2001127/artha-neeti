@@ -2,6 +2,7 @@ import { useState } from "react";
 import RoutingPanel from "../progress/RoutingPanel";
 import CompanyReportCard from "./CompanyReportCard";
 import ComparisonView from "./ComparisonView";
+import PortfolioView from "./PortfolioView";
 import FollowUpPanel from "./FollowUpPanel";
 
 function CopyLinkButton() {
@@ -101,6 +102,7 @@ export default function ReportView({ job, onNewQuery, onEscalate }) {
       {!isNone && isMulti && (
         <div className="space-y-8">
           <ComparisonView comparison={report.comparison} />
+          <PortfolioView portfolio={report.portfolio} />
           <div>
             <h2 className="text-[13px] font-semibold uppercase tracking-wide text-[var(--color-ink)] mb-4">
               Per-company reports

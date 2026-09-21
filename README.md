@@ -94,6 +94,7 @@ The Groq-for-reasoning / Gemini-for-classification-and-embeddings split is delib
 | Filings beyond the seeded 10 (upload + auto-fetch) | ✅ built — `POST /filings/upload` (a PDF you have) and `POST /filings/fetch` (best-effort web search + download), both wired into Planner routing and `GET /companies` |
 | Real progress (routing live, per-tool-call stages, historical ETA) | ✅ built — no more static spinner or hardcoded time estimate; see `app/README.md`'s "How live progress works" |
 | Follow-up conversational queries | ✅ built — cheap synchronous answers grounded in a finished report, escalating to a real Planner run only when asked; see `app/README.md`'s "Follow-up conversations" |
+| Portfolio-level analysis | ✅ built — a new Planner mode for "I hold X and Y" style questions: weighted P/E/ROE/dividend yield and sector allocation computed in code, diversification/concentration reasoning in one LLM call; see `agents/README.md`'s "portfolio node" |
 | Deployment | ⬜ not started |
 
 Each component has its own README with the design decisions, test evidence, and known limitations (`mcp_servers/*/README.md`, `agents/README.md`, `shared/README.md`). The agent tests are runnable scripts that print full reasoning traces and structured output, not just pass/fail.
@@ -201,7 +202,10 @@ python shared/test_llm_rate_limiter.py
 - [x] Follow-up conversational queries — answered from the finished report
       when possible (one cheap LLM call, no wait), escalating to a real
       Planner run only when the user confirms it's needed
-- [ ] Portfolio-level analysis
+- [x] Portfolio-level analysis — "I hold X and Y" questions get a genuinely
+      different lens than a head-to-head comparison: weighted valuation
+      metrics and sector allocation computed in code, diversification/
+      concentration reasoning in the LLM, explicitly not a quant risk model
 - [ ] UI/branding polish pass
 - [ ] Deployment
 
