@@ -45,15 +45,28 @@ REPO_ROOT = _REPO_ROOT
 # headers). llama-3.3-70b was retired on Groq; gpt-oss-120b is the current
 # large general reasoner. gemma2-9b-it (the previous last rung) was itself
 # decommissioned by Groq - confirmed live via a 400 "has been decommissioned"
-# error, not just docs (and llama-3.1-8b-instant, an initially plausible
-# replacement, turned out to 404 on this account's actual model list - Groq's
-# docs and an account's real access don't always agree, so this was checked
-# against `client.models.list()`, not assumed). allam-2-7b replaces it: a
-# genuinely separate quota bucket (7000 req/day, 6000 TPM, live-checked) and
-# confirmed both listed active and working end to end. GROQ_AGENT_MODEL
-# overrides the primary.
+# error, not just docs. Two replacements were tried and rejected/accepted by
+# live-testing the actual ReAct tool-calling loop (not just a bare chat
+# completion - every specialist agent needs real tool calling, and that's
+# exactly what breaks silently if skipped):
+#   - llama-3.1-8b-instant looked right from Groq's docs but 404's on this
+#     account's real model list.
+#   - allam-2-7b IS listed/active and answers a plain prompt fine, but hard-
+#     fails every time on a tool-calling request ("`tool calling` is not
+#     supported with this model") - worse than the dead model it would have
+#     replaced, since it fails 100% of the time instead of only when reached
+#     mid-decommission.
+# openai/gpt-oss-safeguard-20b (a safety-policy-tuned gpt-oss-20b variant)
+# is the one that actually works: real tool calling confirmed against
+# get_peer_comparison, and a separate quota bucket from gpt-oss-20b (live-
+# checked headers - same 1000 req/day, 8k TPM, but counted independently by
+# model id). One structured-output schema slip was observed in 3 live test
+# calls (a comparison query's synthesis call), not repeated on retry - normal
+# small-model structured-output brittleness, not a hard incompatibility, and
+# this is the last-resort rung only reached under real quota pressure.
+# GROQ_AGENT_MODEL overrides the primary.
 DEFAULT_MODEL = os.environ.get("GROQ_AGENT_MODEL", "openai/gpt-oss-120b")
-FALLBACK_MODELS = ("qwen/qwen3.8-27b", "openai/gpt-oss-20b", "allam-2-7b")
+FALLBACK_MODELS = ("qwen/qwen3.8-27b", "openai/gpt-oss-20b", "openai/gpt-oss-safeguard-20b")
 RECURSION_LIMIT = 16
 
 
