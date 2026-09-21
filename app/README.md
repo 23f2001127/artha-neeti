@@ -15,6 +15,9 @@ background job, and persist/expose its progress.
 | `POST /research` `{"query": str}` | Creates a `research_jobs` row (`status: queued`), fires the Planner as a **detached `asyncio` task**, returns `{job_id, status}` at once. Never blocks on the run. |
 | `GET /research/{job_id}` | The poll endpoint. `status` (`queued`/`running`/`done`/`error`), `routing` (the structured routing decision, present once the route node finishes — seconds in) + `routing_trace` (the same decision as flat log lines, for an optional "full trace" view), `specialist_status` (`{ticker: {specialist: "pending"\|"<live stage text>"\|"ok"\|"error:…"}}`, updated per tool call — not just per specialist), `estimated_duration_seconds`/`estimated_duration_samples` (a real historical-average ETA computed the moment routing lands — see below; `null` until then or if there's no history yet), `report` (the final Planner output, once done), `error`. |
 | `GET /research/{job_id}/report` | Just the finished report. `409` while still `queued`/`running`. |
+| `POST /research/{job_id}/followups` `{query}` | A cheap, **synchronous** follow-up on a finished report — one LLM call, answered within the request (no job/poll needed). Returns `{sufficient_data, answer?, caveat?, missing_reason?, standalone_query?}`. See "Follow-up conversations" below. |
+| `GET /research/{job_id}/followups` | Past follow-up turns for this job's conversation, chronological: `{conversation_id, turns: [...]}`. |
+| `POST /research/{job_id}/followups/escalate` `{standalone_query}` | When a follow-up needs fresh data: starts a real Planner run continuing the conversation (`conversation_id` inherited, `parent_job_id` set). Same dispatch as `POST /research` — returns `{job_id, status}`, poll it the same way. |
 | `GET /companies` | `full_coverage` — every company with an ingested filing, seeded or since uploaded (`agents.filings_agent.ingested_tickers()`, DB-backed — not a static list), answerable by all three specialists — vs `partial_coverage` — any NSE ticker that resolves on yfinance gets market data + news; filings is skipped with a reason. |
 | `POST /filings/upload` (multipart: `file`, `ticker`, `company`?, `fiscal_year`?) | Ingests an ad-hoc annual-report PDF for a company outside the seeded 10, so it's immediately in `full_coverage` and routable by the Planner. Same job pattern as `/research` — returns `{job_id}` at once; the pipeline (chunk → embed → store) is the exact one `mcp_servers/filings_rag_mcp/ingest.py`'s CLI uses, just pointed at one ad-hoc file instead of `data/filings/`. |
 | `POST /filings/fetch` `{ticker, company?, fiscal_year?}` | Best-effort alternative to upload — no file needed. Searches the web for the annual report, downloads and verifies it actually names the company, then ingests it the same way. See `mcp_servers/filings_rag_mcp/fetch.py`'s docstring for exactly how and why it can (honestly) fail to find one. |
@@ -56,20 +59,65 @@ The in-memory task handle is kept only so it isn't GC'd and so a crash is logged
 `run_job` writes `status='error'` on any failure, so the poll endpoint always
 reflects reality.
 
-## Persistence — `research_jobs`, `filing_upload_jobs`
+## Follow-up conversations (`app/followups.py`)
+
+Every question used to be an isolated Planner run, even a trivial "what was
+its ROE again?" — full 1-20+ minute cost, every time. Now a finished job can
+be followed up on two ways, both reusing existing infrastructure rather than
+introducing a parallel "conversation" system:
+
+- **Cheap path (the common case)**: `POST /research/{job_id}/followups`
+  answers synchronously from the report's *already-synthesized* content
+  (`agents/followup_agent.py`, modeled on `synthesis_agent.py` — one
+  structured-output call, no MCP, no ReAct loop). A few seconds, one Groq
+  call, no job/poll needed at all.
+- **Escalation (only when the cheap path can't)**: the same LLM call that
+  decides "can I answer this" also produces a `standalone_query` when it
+  can't — a fully self-contained rewrite with references to earlier turns
+  resolved ("its" → the actual company). `POST
+  /research/{job_id}/followups/escalate` hands that straight to a brand-new
+  Planner run via the *exact same* `db.create_job` → `asyncio.create_task
+  (jobs.run_job(...))` dispatch `POST /research` uses — nothing new to
+  maintain, no partial-re-run logic. This only happens when the user
+  explicitly confirms it (a button click after seeing why the report fell
+  short), never silently — a full run is real cost, not something to spend
+  without asking.
+
+**Conversation state piggybacks on `research_jobs`** rather than a new
+`conversations` table: a fresh top-level query is its own conversation root
+(`conversation_id = job_id`); an escalated follow-up inherits the original
+`conversation_id` and sets `parent_job_id` to the job it continued from. Only
+the cheap chat-style turns get their own table (`followup_turns`) since they
+don't fit the job/poll model at all — they're answered within one request.
+
+**Scoped out of v1, on purpose**: escalation always re-runs the *whole*
+Planner graph rather than intelligently reusing specialists that are still
+valid from the prior run. Deciding what's "still valid" (is last run's news
+still fresh? did the filing change?) is real complexity that didn't seem worth
+taking on for the first version — a full re-run is simple, correct, and the
+cost is opt-in. Worth revisiting if follow-ups turn out to escalate often.
+
+## Persistence — `research_jobs`, `filing_upload_jobs`, `followup_turns`
 
 `app/db.py`, same Supabase Postgres as `filings-rag-mcp`, same `connect()`
 pattern (fresh connection per call). `research_jobs`: `job_id uuid`, `query`,
 `status`, `routing_trace jsonb`, `routing jsonb`, `specialist_status jsonb`,
 `estimated_duration_seconds real`, `estimated_duration_samples int`,
-`report jsonb`, `error`, `created_at`, `updated_at`. `filing_upload_jobs` (same
-shape, shared by `/filings/upload` and `/filings/fetch`): `job_id`, `ticker`,
-`company`, `fiscal_year`, `filename`, `source` (`upload`/`fetch`), `source_url`,
-`detail`, `status`, `chunks_done`, `chunks_total`, `chunks`, `error`,
-timestamps. Both schemas are created on startup (`ALTER TABLE ... ADD COLUMN
-IF NOT EXISTS` for every column added after the tables' first version, so an
-already-existing table from before this
-feature migrates in place).
+`report jsonb`, `error`, `conversation_id uuid`, `parent_job_id uuid` (FK to
+`research_jobs`, null unless this row is an escalated follow-up), `created_at`,
+`updated_at`. `filing_upload_jobs` (same shape, shared by `/filings/upload`
+and `/filings/fetch`): `job_id`, `ticker`, `company`, `fiscal_year`,
+`filename`, `source` (`upload`/`fetch`), `source_url`, `detail`, `status`,
+`chunks_done`, `chunks_total`, `chunks`, `error`, timestamps. `followup_turns`:
+`id bigserial`, `conversation_id`, `job_id` (which report this was asked
+against), `query`, `answer`, `sufficient_data boolean`, `caveat`,
+`missing_reason`, `standalone_query`, `created_at`.
+
+All schemas are created on startup (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
+for every column added after a table's first version, so an already-existing
+table migrates in place). `research_jobs`' schema init also runs a one-time
+`UPDATE ... SET conversation_id = job_id WHERE conversation_id IS NULL`, so
+every job created before this feature is still a valid conversation root.
 
 ## The filings upload + auto-fetch features (`app/filings.py`)
 

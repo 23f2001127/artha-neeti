@@ -93,6 +93,7 @@ The Groq-for-reasoning / Gemini-for-classification-and-embeddings split is delib
 | React frontend | ✅ built — landing page, live agent-trace progress view, cited report view, dark/light theme |
 | Filings beyond the seeded 10 (upload + auto-fetch) | ✅ built — `POST /filings/upload` (a PDF you have) and `POST /filings/fetch` (best-effort web search + download), both wired into Planner routing and `GET /companies` |
 | Real progress (routing live, per-tool-call stages, historical ETA) | ✅ built — no more static spinner or hardcoded time estimate; see `app/README.md`'s "How live progress works" |
+| Follow-up conversational queries | ✅ built — cheap synchronous answers grounded in a finished report, escalating to a real Planner run only when asked; see `app/README.md`'s "Follow-up conversations" |
 | Deployment | ⬜ not started |
 
 Each component has its own README with the design decisions, test evidence, and known limitations (`mcp_servers/*/README.md`, `agents/README.md`, `shared/README.md`). The agent tests are runnable scripts that print full reasoning traces and structured output, not just pass/fail.
@@ -152,6 +153,10 @@ curl -X POST localhost:8000/research -H 'content-type: application/json' \
 # -> {"job_id": "...", "status": "queued"}
 
 curl localhost:8000/research/<job_id>   # status, routing_trace (early), specialist_status (live), report (when done)
+
+# ask a follow-up on a finished report - fast, one LLM call, no polling
+curl -X POST localhost:8000/research/<job_id>/followups -H 'content-type: application/json' \
+     -d '{"query": "what was its ROE again?"}'
 curl localhost:8000/companies           # full vs partial coverage
 curl localhost:8000/status              # live LLM-quota usage per provider bucket
 
@@ -193,7 +198,9 @@ python shared/test_llm_rate_limiter.py
 - [x] Real progress — structured routing pushed live, per-tool-call stage text
       instead of a static spinner, a historical-data-driven ETA, `GET /status`
       for live quota visibility
-- [ ] Follow-up conversational queries
+- [x] Follow-up conversational queries — answered from the finished report
+      when possible (one cheap LLM call, no wait), escalating to a real
+      Planner run only when the user confirms it's needed
 - [ ] Portfolio-level analysis
 - [ ] UI/branding polish pass
 - [ ] Deployment

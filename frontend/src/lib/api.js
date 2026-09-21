@@ -100,4 +100,27 @@ export function getFilingJob(jobId) {
   return request(`/filings/jobs/${jobId}`);
 }
 
+/** POST /research/{job_id}/followups {query} -> {sufficient_data, answer?, caveat?,
+ * missing_reason?, standalone_query?, error?}. Fast (one LLM call, no job/poll). */
+export function askFollowup(jobId, query) {
+  return request(`/research/${jobId}/followups`, {
+    method: "POST",
+    body: JSON.stringify({ query }),
+  });
+}
+
+/** GET /research/{job_id}/followups -> {conversation_id, turns: [...]} */
+export function getFollowups(jobId) {
+  return request(`/research/${jobId}/followups`);
+}
+
+/** POST /research/{job_id}/followups/escalate {standalone_query} -> {job_id, status}
+ * Starts a real Planner run continuing this conversation - poll it like any other job. */
+export function escalateFollowup(jobId, standaloneQuery) {
+  return request(`/research/${jobId}/followups/escalate`, {
+    method: "POST",
+    body: JSON.stringify({ standalone_query: standaloneQuery }),
+  });
+}
+
 export { ApiError };

@@ -62,8 +62,18 @@ no axios, no query-caching library — polling a single job doesn't need one.
   sections, `ConflictsPanel` (cross-specialist tensions, reconciled, given equal
   visual weight to the summary rather than buried), `SourcesPanel` (a
   references-style list from `sources_by_claim`), `CaveatsPanel` (collapsed by
-  default so it's present but doesn't compete with the findings), and for
-  multi-company queries, `ComparisonView` (verdict + a dimension table).
+  default so it's present but doesn't compete with the findings), for
+  multi-company queries `ComparisonView` (verdict + a dimension table), and
+  `FollowUpPanel` — a small chat under the report for asking a follow-up
+  without re-running anything: `POST .../followups` answers synchronously
+  (no polling, it's one fast LLM call) and renders as a normal Q&A bubble
+  pair. When the report doesn't cover what was asked, the turn instead shows
+  why (`missing_reason`) and a "Run full research on this" button
+  (`POST .../followups/escalate`) that hands the pre-written
+  `standalone_query` to a real Planner run — `App.jsx`'s `onEscalate` just
+  calls `setJobId(newJobId)`, the exact same transition `handleSubmit` already
+  does after `POST /research`, so the whole progress → report flow works
+  unchanged for it.
 
 ## Routing renders off the structured decision, not parsed log lines
 

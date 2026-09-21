@@ -303,6 +303,45 @@ hedge (roe_source, "self-reported… not exhaustive", "similarity-based… singl
 annual report"). Case 2 marked filings *"Not available"* and did not invent
 filings-sourced claims. Paced `SYNTH_TEST_GAP_S` (45 s) apart.
 
+## `followup_agent.py` — Follow-up Agent
+
+Modeled directly on `synthesis_agent.py`: no MCP server, no ReAct loop, one
+structured-output call. Answers a conversational follow-up on top of a
+**finished** job's report - see `app/README.md`'s "Follow-up conversations"
+for the API layer (`app/followups.py`, `POST/GET /research/{job_id}/followups`).
+
+```python
+from agents.followup_agent import answer_followup
+result = await answer_followup(original_query, report, prior_turns, "and its ROE?")
+```
+
+One call decides two things at once, rather than a classifier call followed by
+a separate rewrite call:
+
+- **`sufficient_data: true`** — the report already contains enough to answer.
+  `answer` is grounded ONLY in the report's `sections` / `sources_by_claim` /
+  `conflicts_flagged` / `overall_caveats` (same fields `_compact_report` pulls
+  out); `caveat` carries the strongest relevant hedge forward, the same rule
+  `synthesis_agent` uses for its own claims.
+- **`sufficient_data: false`** — the question needs a company/metric the
+  report doesn't cover, or genuinely fresh data the report's as-of snapshot
+  can't provide. `missing_reason` says why in plain language, and
+  `standalone_query` is a fully self-contained research question with every
+  reference to earlier turns resolved ("its" → the actual company name) - the
+  point is it can be handed straight to `planner.plan()` with **no memory of
+  this conversation** and still make sense.
+
+`prior_turns` (a compact `[{question, answer}]` list, capped to the most
+recent `_MAX_PRIOR_TURNS`) is what lets a multi-hop chain of follow-ups keep
+resolving references correctly, not just the single most recent question.
+
+Deliberately does **not** have access to the specialists' pre-synthesis
+`raw_data` - only the finished, already-distilled report (that's all
+`research_jobs.report` persists once a job completes; see the Planner's
+`_finalize_node`). A follow-up asking for a number that never made it into
+`key_claims`/`sections` correctly comes back `sufficient_data: false` rather
+than guessing - an honest scope limit, not a bug.
+
 ## `planner.py` — the orchestrator
 
 A LangGraph `StateGraph` that turns a raw question into the full pipeline:

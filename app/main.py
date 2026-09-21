@@ -9,8 +9,14 @@ blocks a request on a run:
                                  soon as the route node finishes) + live
                                  specialist_status + the final report when done
     GET  /research/{job_id}/report -> just the finished report (409 until done)
+    POST /research/{job_id}/followups -> a cheap, synchronous follow-up on a
+                                 finished report; escalates to a fresh job
+                                 (.../followups/escalate) only if asked
     GET  /companies           -> full-coverage (3 specialists) vs partial (market
                                  data + news only) so a client can be upfront
+
+    See app/README.md for the full endpoint list and design notes - this
+    header only sketches the shape.
 
 All job state lives in Postgres (``research_jobs``); the in-memory task handle is
 only kept so it isn't garbage-collected and so failures get logged.
@@ -30,7 +36,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from agents.filings_agent import ingested_tickers
-from app import db, filings, jobs
+from app import db, filings, followups, jobs
 from shared import llm_rate_limiter as rl
 
 logging.basicConfig(level=logging.INFO)
@@ -84,6 +90,8 @@ def root() -> dict:
         "docs": "/docs",
         "endpoints": [
             "POST /research", "GET /research/{job_id}", "GET /research/{job_id}/report",
+            "POST /research/{job_id}/followups", "GET /research/{job_id}/followups",
+            "POST /research/{job_id}/followups/escalate",
             "GET /companies", "POST /filings/upload", "POST /filings/fetch",
             "GET /filings/jobs/{job_id}", "GET /status",
         ],
@@ -135,9 +143,19 @@ async def get_research(job_id: uuid.UUID) -> dict:
         "estimated_duration_samples": row["estimated_duration_samples"],  # how many past jobs backed that number
         "report": row["report"],  # null until the run finishes
         "error": row["error"],
+        "conversation_id": str(row["conversation_id"]) if row["conversation_id"] else None,
+        "parent_job_id": str(row["parent_job_id"]) if row["parent_job_id"] else None,
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+
+
+class FollowupRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=500, examples=["what was its ROE again?"])
+
+
+class EscalateFollowupRequest(BaseModel):
+    standalone_query: str = Field(min_length=1, max_length=500)
 
 
 @app.get("/research/{job_id}/report")
@@ -150,6 +168,63 @@ async def get_report(job_id: uuid.UUID) -> dict:
     if row["status"] not in ("done", "error") or row["report"] is None:
         raise HTTPException(status_code=409, detail=f"job is '{row['status']}', report not ready")
     return row["report"]
+
+
+@app.post("/research/{job_id}/followups")
+async def ask_followup(job_id: uuid.UUID, req: FollowupRequest) -> dict:
+    """A cheap, synchronous follow-up on a finished report - one LLM call
+    grounded in what that report already contains, answered within this
+    request (no job/poll needed). If the report doesn't have enough to answer,
+    the response says so (`sufficient_data: false`, `missing_reason`) and
+    hands back a `standalone_query` - POST it to .../followups/escalate to run
+    a proper fresh research job instead. See agents/followup_agent.py."""
+    try:
+        return await followups.ask(str(job_id), req.query.strip())
+    except followups.FollowupError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/research/{job_id}/followups")
+async def list_followups(job_id: uuid.UUID) -> dict:
+    """Past follow-up turns for this job's conversation (chronological)."""
+    row = await asyncio.to_thread(db.get_job, str(job_id))
+    if row is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    conversation_id = row["conversation_id"] or row["job_id"]
+    turns = await asyncio.to_thread(db.get_followup_turns, str(conversation_id))
+    return {
+        "conversation_id": str(conversation_id),
+        "turns": [
+            {
+                "query": t["query"],
+                "answer": t["answer"],
+                "sufficient_data": t["sufficient_data"],
+                "caveat": t["caveat"],
+                "missing_reason": t["missing_reason"],
+                "standalone_query": t["standalone_query"],
+                "created_at": t["created_at"],
+            }
+            for t in turns
+        ],
+    }
+
+
+@app.post("/research/{job_id}/followups/escalate", status_code=202)
+async def escalate_followup(job_id: uuid.UUID, req: EscalateFollowupRequest) -> dict:
+    """Runs a brand-new Planner query continuing this conversation
+    (conversation_id inherited, parent_job_id set to this job) - the same
+    asyncio.create_task + app.jobs.run_job dispatch as POST /research. Poll
+    the returned job_id exactly like a normal research job."""
+    try:
+        new_job_id = await asyncio.to_thread(
+            followups.create_escalation_job, str(job_id), req.standalone_query
+        )
+    except followups.FollowupError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    task = asyncio.create_task(jobs.run_job(new_job_id, req.standalone_query.strip()))
+    _TASKS.add(task)
+    task.add_done_callback(_TASKS.discard)
+    return {"job_id": new_job_id, "status": "queued"}
 
 
 @app.get("/companies")

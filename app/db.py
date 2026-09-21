@@ -35,16 +35,38 @@ CREATE TABLE IF NOT EXISTS research_jobs (
     estimated_duration_samples int,                                     -- how many past jobs backed that estimate
     report                     jsonb,                                   -- final Planner output
     error                      text,
+    conversation_id            uuid,                                    -- groups turns of one conversation; a fresh top-level query = its own job_id
+    parent_job_id              uuid REFERENCES research_jobs (job_id),  -- set only for an escalated follow-up: the job it continued from
     created_at                 timestamptz NOT NULL DEFAULT now(),
     updated_at                 timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS research_jobs_status_idx  ON research_jobs (status);
 CREATE INDEX IF NOT EXISTS research_jobs_created_idx ON research_jobs (created_at DESC);
 -- research_jobs predates these columns - add them for a DB that already has
--- the table (CREATE TABLE IF NOT EXISTS is a no-op there).
+-- the table (CREATE TABLE IF NOT EXISTS is a no-op there). Must run BEFORE
+-- anything that references these columns (the index below, the backfill).
 ALTER TABLE research_jobs ADD COLUMN IF NOT EXISTS routing jsonb;
 ALTER TABLE research_jobs ADD COLUMN IF NOT EXISTS estimated_duration_seconds real;
 ALTER TABLE research_jobs ADD COLUMN IF NOT EXISTS estimated_duration_samples int;
+ALTER TABLE research_jobs ADD COLUMN IF NOT EXISTS conversation_id uuid;
+ALTER TABLE research_jobs ADD COLUMN IF NOT EXISTS parent_job_id uuid REFERENCES research_jobs (job_id);
+CREATE INDEX IF NOT EXISTS research_jobs_conversation_idx ON research_jobs (conversation_id);
+-- every job is a valid conversation root until it's known to be a follow-up
+UPDATE research_jobs SET conversation_id = job_id WHERE conversation_id IS NULL;
+
+CREATE TABLE IF NOT EXISTS followup_turns (
+    id               bigserial   PRIMARY KEY,
+    conversation_id  uuid        NOT NULL,
+    job_id           uuid        NOT NULL REFERENCES research_jobs (job_id),  -- which report this was asked against
+    query            text        NOT NULL,
+    answer           text,
+    sufficient_data  boolean     NOT NULL,
+    caveat           text,
+    missing_reason   text,
+    standalone_query text,
+    created_at       timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS followup_turns_conversation_idx ON followup_turns (conversation_id, created_at);
 
 CREATE TABLE IF NOT EXISTS filing_upload_jobs (
     job_id         uuid        PRIMARY KEY,
@@ -106,12 +128,16 @@ def init_schema() -> None:
 
 
 # --------------------------------------------------------------------------- #
-def create_job(query: str) -> str:
+def create_job(query: str, *, conversation_id: str | None = None, parent_job_id: str | None = None) -> str:
+    """A fresh top-level query is its own conversation root (conversation_id
+    defaults to its own job_id). An escalated follow-up (see app/followups.py)
+    passes the ORIGINAL conversation_id and its parent_job_id explicitly."""
     job_id = str(uuid.uuid4())
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO research_jobs (job_id, query, status) VALUES (%s, %s, 'queued')",
-            (job_id, query),
+            """INSERT INTO research_jobs (job_id, query, status, conversation_id, parent_job_id)
+               VALUES (%s, %s, 'queued', %s, %s)""",
+            (job_id, query, conversation_id or job_id, parent_job_id),
         )
         conn.commit()
     return job_id
@@ -181,6 +207,48 @@ def estimate_duration_seconds(mode: str) -> tuple[float | None, int]:
     if overall_n:
         return float(overall_avg), int(overall_n)
     return None, 0
+
+
+# --------------------------------------------------------------------------- #
+# followup_turns - the cheap chat-style Q&A on top of a finished report (see
+# app/followups.py). Answered synchronously (one LLM call), so unlike
+# research_jobs/filing_upload_jobs there's no status/progress to track - a
+# turn is simply inserted once its answer is ready.
+# --------------------------------------------------------------------------- #
+def create_followup_turn(
+    *,
+    conversation_id: str,
+    job_id: str,
+    query: str,
+    sufficient_data: bool,
+    answer: str | None = None,
+    caveat: str | None = None,
+    missing_reason: str | None = None,
+    standalone_query: str | None = None,
+) -> None:
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO followup_turns
+               (conversation_id, job_id, query, answer, sufficient_data, caveat,
+                missing_reason, standalone_query)
+               VALUES (%(conversation_id)s, %(job_id)s, %(query)s, %(answer)s,
+                       %(sufficient_data)s, %(caveat)s, %(missing_reason)s, %(standalone_query)s)""",
+            {
+                "conversation_id": conversation_id, "job_id": job_id, "query": query,
+                "answer": answer, "sufficient_data": sufficient_data, "caveat": caveat,
+                "missing_reason": missing_reason, "standalone_query": standalone_query,
+            },
+        )
+        conn.commit()
+
+
+def get_followup_turns(conversation_id: str) -> list[dict]:
+    with connect() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT * FROM followup_turns WHERE conversation_id = %s ORDER BY created_at",
+            (conversation_id,),
+        )
+        return [dict(r) for r in cur.fetchall()]
 
 
 # --------------------------------------------------------------------------- #

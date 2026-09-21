@@ -2,6 +2,7 @@ import { useState } from "react";
 import RoutingPanel from "../progress/RoutingPanel";
 import CompanyReportCard from "./CompanyReportCard";
 import ComparisonView from "./ComparisonView";
+import FollowUpPanel from "./FollowUpPanel";
 
 function CopyLinkButton() {
   const [copied, setCopied] = useState(false);
@@ -19,7 +20,7 @@ function CopyLinkButton() {
   );
 }
 
-export default function ReportView({ job, onNewQuery }) {
+export default function ReportView({ job, onNewQuery, onEscalate }) {
   const [showRouting, setShowRouting] = useState(false);
   const report = job.report;
 
@@ -121,6 +122,12 @@ export default function ReportView({ job, onNewQuery }) {
       {!isNone && !isMulti && tickers.length > 0 && (
         <div className="rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] shadow-[var(--shadow-card)] p-6 fade-up">
           <CompanyReportCard ticker={tickers[0]} report={report.reports[tickers[0]]} heading={false} />
+        </div>
+      )}
+
+      {!isNone && (
+        <div className="mt-8 fade-up">
+          <FollowUpPanel jobId={job.job_id} onEscalate={onEscalate} />
         </div>
       )}
     </div>

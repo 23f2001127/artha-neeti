@@ -52,6 +52,12 @@ function AppShell() {
     setJobId(null);
     setScreen("app");
   }, []);
+  // A follow-up that needed fresh research already has its job created
+  // server-side (POST .../followups/escalate) - just switch to it, same as
+  // handleSubmit does after POST /research.
+  const onEscalate = useCallback((newJobId) => {
+    setJobId(newJobId);
+  }, []);
   const goToLanding = useCallback(() => {
     setJobId(null);
     setScreen("landing");
@@ -71,7 +77,7 @@ function AppShell() {
     content = <ProgressView job={job} pollError={pollError} onNewQuery={goToQuery} />;
   } else {
     key = "report";
-    content = <ReportView job={job} onNewQuery={goToQuery} />;
+    content = <ReportView job={job} onNewQuery={goToQuery} onEscalate={onEscalate} />;
   }
 
   return (
