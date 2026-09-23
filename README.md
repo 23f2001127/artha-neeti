@@ -116,7 +116,8 @@ venv\Scripts\activate            # Windows;  source venv/bin/activate on Unix
 pip install -r requirements.txt
 ```
 
-Create `.env` in the repo root:
+Create `.env` in the repo root (see `.env.example` for the full list,
+including optional tuning vars — these four are the only required ones):
 
 ```env
 GROQ_API_KEY=...
@@ -213,6 +214,10 @@ python shared/test_llm_rate_limiter.py
       gallery on the landing page, and a real generated PDF download
       (pure-Python `xhtml2pdf`, not a print dialog)
 - [ ] Deployment
+
+## License
+
+[MIT](LICENSE).
 
 ---
 
