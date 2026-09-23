@@ -4,6 +4,7 @@ import AgentGraph from "../common/AgentGraph";
 import { deriveAgentGraph } from "../../lib/deriveAgentGraph";
 import RoutingPanel from "./RoutingPanel";
 import SpecialistGrid from "./SpecialistGrid";
+import TimeGauge from "./TimeGauge";
 
 /** Elapsed since the job actually started (server created_at), not since this
  * component mounted - a refresh or a shared job link must not reset the clock,
@@ -39,6 +40,12 @@ function etaLabel(job, elapsed) {
   const basis = `based on ${samples} past run${samples === 1 ? "" : "s"} of this kind`;
   if (remaining <= 5) return `wrapping up any moment — ${basis}`;
   return `~${fmtElapsed(remaining)} remaining — ${basis}`;
+}
+
+/** Same "wrapping up" threshold etaLabel() uses, for TimeGauge's color. */
+function isWrappingUp(job, elapsed) {
+  const est = job?.estimated_duration_seconds;
+  return est != null && est - elapsed <= 5;
 }
 
 function phaseLabel(job) {
@@ -89,15 +96,19 @@ export default function ProgressView({ job, pollError, onNewQuery }) {
         </button>
       </motion.div>
 
-      <motion.div variants={fadeUp} initial="hidden" animate="show" custom={1} className="flex items-center gap-3 mb-6">
-        <span className="inline-flex items-center gap-2 text-[13px] font-medium text-[var(--color-running)] bg-[var(--color-running-tint)] px-3 py-1.5 rounded-full">
-          <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-running)] pulse-dot" />
-          {phaseLabel(job)}
-        </span>
-        <span className="mono text-[12px] text-[var(--color-ink-faint)]">{fmtElapsed(elapsed)} elapsed</span>
-        {eta && (
-          <span className="text-[11.5px] text-[var(--color-ink-faint)] hidden sm:inline">— {eta}</span>
-        )}
+      <motion.div variants={fadeUp} initial="hidden" animate="show" custom={1} className="flex items-center gap-4 mb-6">
+        <TimeGauge
+          elapsed={elapsed}
+          estimatedDuration={job?.estimated_duration_seconds}
+          wrappingUp={isWrappingUp(job, elapsed)}
+        />
+        <div className="flex flex-col gap-1.5">
+          <span className="inline-flex items-center gap-2 self-start text-[13px] font-medium text-[var(--color-running)] bg-[var(--color-running-tint)] px-3 py-1.5 rounded-full">
+            <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-running)] pulse-dot pulse-glow" />
+            {phaseLabel(job)}
+          </span>
+          {eta && <span className="text-[11.5px] text-[var(--color-ink-faint)]">{eta}</span>}
+        </div>
       </motion.div>
 
       {pollError && (

@@ -212,6 +212,42 @@ body {
   50% { text-shadow: 0 0 18px var(--color-brand-tint); }
 }
 
+/* Additive accent tokens - built from existing color variables only, not new
+   hues. A subtle radial wash for the hero (layered under .grid-veil, not
+   replacing it) and a thin brand->accent rule for "headline" emphasis
+   (the report's executive summary, echoing the same accent treatment given
+   to the PDF export). Deliberately restrained per the agreed direction:
+   accents within the existing near-black/emerald/gold palette, not a
+   broader color overhaul. */
+.hero-glow {
+  background: radial-gradient(ellipse 65% 55% at 28% 15%, var(--color-brand-tint), transparent 70%);
+}
+.accent-rule-gradient {
+  background: linear-gradient(90deg, var(--color-brand), var(--color-accent));
+}
+
+/* A soft breathing glow ring around a live "running" indicator dot, using
+   the same status-color vocabulary (amber = in progress) rather than a flat
+   pulse alone. */
+@keyframes glow-pulse-running {
+  0%, 100% { box-shadow: 0 0 0 0 var(--color-running-tint); }
+  50% { box-shadow: 0 0 0 5px var(--color-running-tint); }
+}
+.pulse-glow {
+  animation: glow-pulse-running 1.6s ease-in-out infinite;
+}
+
+/* Indeterminate-state spinner arc (TimeGauge, before a historical ETA
+   exists) - continuous rotation, no framer-motion dependency. */
+@keyframes spin-slow {
+  to { transform: rotate(360deg); }
+}
+.spin-slow {
+  animation: spin-slow 1.3s linear infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--color-border-strong) transparent;

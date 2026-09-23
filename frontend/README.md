@@ -56,8 +56,13 @@ no axios, no query-caching library — polling a single job doesn't need one.
   server-side the moment routing lands, see `app/README.md`), counted down
   client-side against elapsed time measured from the job's own `created_at`
   (not page-load time, so a refreshed or shared job link still shows the right
-  elapsed/remaining). With no history yet, it says so plainly instead of
-  guessing. `AgentGraph` (`components/common/`) is the centerpiece for a
+  elapsed/remaining). `TimeGauge` renders this as a compact radial meter
+  instead of plain text: determinate (elapsed / `estimated_duration_seconds`)
+  once a real historical estimate exists, an indeterminate spinning arc
+  otherwise — never a fake percentage with nothing to back it, same honesty
+  `etaLabel()` already had. Color reuses the app's existing status
+  vocabulary (amber while running, green once wrapping up), not a new hue —
+  pure inline SVG, no framer-motion dependency. `AgentGraph` (`components/common/`) is the centerpiece for a
   single-company run: the same Planner→specialists diagram as the landing
   page, but wired to real `specialist_status` — nodes animate from idle to
   running (pulsing ring) to done/error/skipped as the run actually progresses.
@@ -140,7 +145,13 @@ reconstructs structure from log lines anymore.
 
 A research terminal, not a generic SaaS dashboard: near-black by default with a
 vivid emerald for interactive elements and gold reserved for the mark and rare
-emphasis — no gradient blobs, no glassmorphism. **Dark is the default theme**;
+emphasis — no loud gradient blobs, no glassmorphism. Two restrained additive
+accents (2026-09-23) stay inside that rule rather than break it: `.hero-glow`
+(a soft radial `--color-brand-tint` wash behind the landing hero, layered
+under `.grid-veil`, not replacing it) and `.accent-rule-gradient` (a thin
+brand→gold line marking the report's executive summary and, mirrored in
+`app/report_pdf.py`, the PDF export's header) — both built from existing
+color tokens, no new hues introduced. **Dark is the default theme**;
 light is a full, equally-designed second palette (deep pine on warm paper), not
 an afterthought — `ThemeToggle` switches instantly with no flash on load (the
 choice is applied before first paint via an inline script in `index.html`, then

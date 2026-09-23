@@ -103,6 +103,7 @@ export default function LandingPage({ onLaunch, onViewJob }) {
 
       {/* hero */}
       <div className="relative overflow-hidden">
+        <div className="absolute inset-0 hero-glow pointer-events-none" />
         <div className="absolute inset-0 grid-veil pointer-events-none" />
         <Section className="relative pt-20 pb-24 grid grid-cols-1 lg:grid-cols-[1.1fr_0.9fr] gap-14 items-center">
           <motion.div initial="hidden" animate="show" variants={stagger}>

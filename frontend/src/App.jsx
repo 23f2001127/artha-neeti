@@ -21,9 +21,9 @@ function jobIdFromUrl() {
 // key-based remount still unmounts the old view immediately and correctly;
 // it just skips an exit animation, which is a fine trade for correctness.
 const fade = {
-  initial: { opacity: 0, y: 8 },
-  animate: { opacity: 1, y: 0 },
-  transition: { duration: 0.25, ease: "easeOut" },
+  initial: { opacity: 0, y: 8, scale: 0.99 },
+  animate: { opacity: 1, y: 0, scale: 1 },
+  transition: { duration: 0.28, ease: "easeOut" },
 };
 
 function AppShell() {

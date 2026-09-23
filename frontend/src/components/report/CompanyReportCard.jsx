@@ -26,7 +26,10 @@ export default function CompanyReportCard({ ticker, report, heading = true }) {
         </div>
       )}
 
-      <p className="text-[15px] leading-relaxed text-[var(--color-ink)]">{report.executive_summary}</p>
+      <div className="relative overflow-hidden rounded-[var(--radius-lg)] bg-[var(--color-brand-tint)] px-5 py-4">
+        <div className="absolute inset-x-0 top-0 h-[3px] accent-rule-gradient" />
+        <p className="text-[15px] leading-relaxed text-[var(--color-ink)]">{report.executive_summary}</p>
+      </div>
 
       <SpecialistSections sections={report.sections} />
       <ConflictsPanel conflicts={report.conflicts_flagged} />

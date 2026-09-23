@@ -134,6 +134,20 @@ these render as blank boxes unless normalized first; `report_pdf.py`'s
 Verified against real reports (single-company, comparison, and portfolio
 shapes) — no missing glyphs, multi-page layout holds up.
 
+**Branding pass (2026-09-23)**: the document now carries the app's own mark
+(the frontend's `apple-touch-icon.png`, embedded as a base64 data URI at
+import time so the PDF stays self-contained — no filesystem path resolution
+at request time), a mode badge (Single company / Comparison / Portfolio),
+a gold accent rule, a tinted "headline" block for the executive summary
+(mirroring the same treatment `CompanyReportCard.jsx` gives it in the app),
+and real per-page footers via `xhtml2pdf`'s `@frame footer_frame` +
+`<pdf:pagenumber/>`/`<pdf:pagecount/>` tags — confirmed working with a
+throwaway test PDF before committing to the pattern. Deliberately did NOT
+reuse the frontend's specialist glyphs (▲◐▤) here — checked and Helvetica
+doesn't cover that Unicode block either, the same class of bug already
+fixed once for the ₹ sign; a left-border accent gives the same visual
+separation without the risk.
+
 ## Persistence — `research_jobs`, `filing_upload_jobs`, `followup_turns`
 
 `app/db.py`, same Supabase Postgres as `filings-rag-mcp`, same `connect()`
