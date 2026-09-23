@@ -96,7 +96,7 @@ The Groq-for-reasoning / Gemini-for-classification-and-embeddings split is delib
 | Follow-up conversational queries | ✅ built — cheap synchronous answers grounded in a finished report, escalating to a real Planner run only when asked; see `app/README.md`'s "Follow-up conversations" |
 | Portfolio-level analysis | ✅ built — a new Planner mode for "I hold X and Y" style questions: weighted P/E/ROE/dividend yield and sector allocation computed in code, diversification/concentration reasoning in one LLM call; see `agents/README.md`'s "portfolio node" |
 | UI/branding polish (social-share preview, favicon completion, keyboard focus, example-reports gallery, real PDF export) | ✅ built — see `frontend/README.md`'s "Brand assets" + `app/README.md`'s "PDF export" |
-| Deployment | ⬜ not started |
+| Deployment | 🟡 code/config ready (CORS lockdown, daily quota + IP throttle, `render.yaml`, `vercel.json` — see "Deploying" below); not yet live |
 
 Each component has its own README with the design decisions, test evidence, and known limitations (`mcp_servers/*/README.md`, `agents/README.md`, `shared/README.md`). The agent tests are runnable scripts that print full reasoning traces and structured output, not just pass/fail.
 
@@ -180,6 +180,51 @@ python agents/test_market_data_agent.py
 python mcp_servers/filings_rag_mcp/test_retrieval.py
 python shared/test_llm_rate_limiter.py
 ```
+
+---
+
+## Deploying
+
+Free hosting throughout: frontend on [Vercel](https://vercel.com), backend
+on [Render](https://render.com)'s free web service. Both read config
+already committed in this repo (`vercel.json`, `render.yaml`) — no manual
+dashboard setup beyond pasting secrets and one URL back and forth.
+
+**The real constraint driving all of this:** the free-tier LLM quotas this
+project runs on are small and *shared* — Gemini's `generate` bucket
+(`shared/llm_rate_limiter.py`) self-caps at roughly 20 requests/day,
+system-wide, and a single research query alone makes several of those
+calls. A public URL with no protection would let a handful of visitors, or
+one crawler, exhaust an entire day's quota for everyone. `app/main.py`
+ships two deployment-only safety limits for exactly this (both no-ops
+locally — see `app/README.md`'s "Deployment safety limits"): a global daily
+cap on new research jobs (`MAX_DAILY_JOBS`), and a per-IP request throttle
+(`IP_THROTTLE_PER_MINUTE`).
+
+1. **Backend, on Render**: New → Blueprint → connect this GitHub repo.
+   Render reads `render.yaml` and creates the web service. In the
+   service's *Environment* tab, paste the real secrets — the same four
+   required values from `.env.example` (`GROQ_API_KEY`, `GEMINI_API_KEY`,
+   `TAVILY_API_KEY`, `DATABASE_URL`) — Render never gets these from the
+   repo itself. Deploy, note the resulting `https://*.onrender.com` URL.
+   (Free tier spins down after 15 minutes idle and takes ~30-60s to wake on
+   the next request — a known, accepted trade-off, not a bug; see
+   `feature-roadmap` reasoning if you ever need the always-on upgrade path,
+   e.g. an Oracle Cloud Always Free VM.)
+2. **Frontend, on Vercel**: New Project → import the same repo. Vercel
+   reads `vercel.json` (builds `frontend/`, no root-directory clicking
+   needed). Add one environment variable: `VITE_API_BASE_DIRECT` = the
+   Render URL from step 1 (this is read at *build* time, see
+   `frontend/.env.example`). Deploy, note the resulting
+   `https://*.vercel.app` URL.
+3. **Back on Render**: set `CORS_ALLOWED_ORIGINS` to the Vercel URL from
+   step 2 (comma-separated if you ever add a second frontend origin, e.g. a
+   preview deployment) — saving it triggers an automatic redeploy.
+4. Smoke-test the live site: submit a real query, watch it run, confirm
+   the finished report renders and the PDF downloads.
+
+The existing Supabase database (already holding the ingested filings
+corpus) is reused as-is — no separate production database.
 
 ---
 

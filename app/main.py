@@ -28,10 +28,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import time
 import uuid
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -60,19 +64,67 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS: wide open for local frontend development.
-# ------------------------------------------------------------------------------
-# TIGHTEN THIS BEFORE ANY PUBLIC DEPLOYMENT. Replace allow_origin_regex with an
-# explicit allow_origins list of the real frontend origin(s), and review whether
-# credentials should be allowed.
-# ------------------------------------------------------------------------------
+# CORS: localhost is always allowed (local dev never breaks); any deployed
+# frontend origin(s) come from CORS_ALLOWED_ORIGINS (comma-separated, e.g.
+# "https://arthaneeti.vercel.app") - set on the backend host once the
+# frontend's real URL is known. Starlette's CORSMiddleware ORs the regex and
+# the explicit list (see is_allowed_origin), so both apply at once.
+_cors_extra_origins = [
+    o.strip() for o in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+    allow_origins=_cors_extra_origins,
     allow_methods=["*"],
     allow_headers=["*"],
     allow_credentials=False,
 )
+
+# --------------------------------------------------------------------------- #
+# Deployment-only safety limits. Both are no-ops (or effectively unlimited)
+# unless explicitly configured, so local dev is unaffected. The real scarce
+# resource behind these is the shared free-tier LLM quota - see
+# shared/llm_rate_limiter.py's Gemini "generate" bucket (~20 req/day,
+# system-wide): a handful of visitors running one query each can empty it for
+# everyone in a single day, so this is capped globally, not per-visitor.
+# --------------------------------------------------------------------------- #
+_MAX_DAILY_JOBS = int(os.environ.get("MAX_DAILY_JOBS", "0"))  # 0 = unlimited (local dev)
+
+# Coarse per-IP abuse throttle (a crawler/bot hammering the endpoint), separate
+# from the daily cap above. In-memory by design - unlike the LLM quota
+# tracker, this doesn't need to survive a restart; it only needs to blunt a
+# burst within one process's lifetime. {ip: deque[monotonic timestamps]}.
+_THROTTLE_WINDOW_S = 60.0
+_THROTTLE_MAX_PER_WINDOW = int(os.environ.get("IP_THROTTLE_PER_MINUTE", "6"))
+_ip_hits: dict[str, deque[float]] = defaultdict(deque)
+
+
+def _check_ip_throttle(request: Request) -> None:
+    ip = request.client.host if request.client else "unknown"
+    now = time.monotonic()
+    hits = _ip_hits[ip]
+    while hits and now - hits[0] > _THROTTLE_WINDOW_S:
+        hits.popleft()
+    if len(hits) >= _THROTTLE_MAX_PER_WINDOW:
+        raise HTTPException(status_code=429, detail="Too many requests - please slow down and try again shortly.")
+    hits.append(now)
+
+
+def _check_daily_job_cap() -> None:
+    if _MAX_DAILY_JOBS <= 0:
+        return
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    count = db.count_jobs_since(cutoff)
+    if count >= _MAX_DAILY_JOBS:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                "Daily demo quota reached - this is a free-tier deployment sharing a small "
+                "LLM budget across every visitor. Try again tomorrow, or run it locally "
+                "(see the README) with your own API keys."
+            ),
+        )
 
 
 class ResearchRequest(BaseModel):
@@ -110,7 +162,7 @@ def status() -> dict:
 
 
 @app.post("/research", status_code=202)
-async def submit_research(req: ResearchRequest) -> dict:
+async def submit_research(req: ResearchRequest, request: Request) -> dict:
     """Queue a research job. Returns immediately; poll GET /research/{job_id}.
 
     The run is a detached ``asyncio.create_task`` rather than FastAPI
@@ -121,6 +173,8 @@ async def submit_research(req: ResearchRequest) -> dict:
     jobs, leaving their row at 'running'. A production build would use a real
     queue or sweep stale rows on startup.)
     """
+    _check_ip_throttle(request)
+    _check_daily_job_cap()
     query = req.query.strip()
     job_id = await asyncio.to_thread(db.create_job, query)
     task = asyncio.create_task(jobs.run_job(job_id, query))
@@ -237,11 +291,13 @@ async def list_followups(job_id: uuid.UUID) -> dict:
 
 
 @app.post("/research/{job_id}/followups/escalate", status_code=202)
-async def escalate_followup(job_id: uuid.UUID, req: EscalateFollowupRequest) -> dict:
+async def escalate_followup(job_id: uuid.UUID, req: EscalateFollowupRequest, request: Request) -> dict:
     """Runs a brand-new Planner query continuing this conversation
     (conversation_id inherited, parent_job_id set to this job) - the same
     asyncio.create_task + app.jobs.run_job dispatch as POST /research. Poll
     the returned job_id exactly like a normal research job."""
+    _check_ip_throttle(request)
+    _check_daily_job_cap()
     try:
         new_job_id = await asyncio.to_thread(
             followups.create_escalation_job, str(job_id), req.standalone_query
@@ -296,6 +352,7 @@ class FetchFilingRequest(BaseModel):
 
 @app.post("/filings/upload", status_code=202)
 async def upload_filing(
+    request: Request,
     file: UploadFile = File(..., description="The annual-report PDF."),
     ticker: str = Form(..., description="NSE-style symbol, e.g. RELIANCE, M&M."),
     company: str | None = Form(None, description="Display name; defaults to the ticker."),
@@ -308,6 +365,7 @@ async def upload_filing(
     POST /research, for the same reason - this can run for minutes against the
     shared embedding rate limit.
     """
+    _check_ip_throttle(request)
     content = await file.read()
     try:
         norm_ticker = filings.validate_upload(file.filename or "", len(content), ticker)
@@ -331,7 +389,7 @@ async def upload_filing(
 
 
 @app.post("/filings/fetch", status_code=202)
-async def fetch_filing(req: FetchFilingRequest) -> dict:
+async def fetch_filing(req: FetchFilingRequest, request: Request) -> dict:
     """Best-effort alternative to /filings/upload: search the web for the
     company's annual-report PDF and ingest it automatically - no file needed.
 
@@ -342,6 +400,7 @@ async def fetch_filing(req: FetchFilingRequest) -> dict:
     POST /filings/upload as the reliable fallback - it is not a bug, just a
     search that didn't turn up a direct link this time.
     """
+    _check_ip_throttle(request)
     try:
         norm_ticker = filings.validate_fetch_request(req.ticker)
     except filings.UploadError as exc:

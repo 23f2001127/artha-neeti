@@ -221,8 +221,10 @@ it up the same way.
   startup.
 - No job-concurrency cap. The shared rate limiter serialises the actual LLM
   calls, but N simultaneous jobs still spawn N sets of MCP subprocesses.
-- CORS is wide-open for `localhost` — **tighten before any public deploy** (see
-  the comment in `main.py`).
+- CORS allows `localhost` unconditionally (local dev never breaks) plus
+  whatever origins are listed in `CORS_ALLOWED_ORIGINS` (comma-separated) —
+  set this to the deployed frontend's real URL once it's known; see
+  `README.md`'s "Deploying" section.
 - The progress callback does a blocking single-row `UPDATE` from inside the
   Planner's event loop. Fine at this scale — per-tool-call stage updates raised
   the write count from roughly one-per-specialist to one-per-tool-call/LLM-turn
@@ -235,6 +237,28 @@ it up the same way.
   finish; it's set once, when routing lands, and counted down from client-side.
   Both are honest simplifications, not bugs - the number gets more meaningful
   as real usage accumulates.
+
+## Deployment safety limits
+
+Both are no-ops locally (unset `MAX_DAILY_JOBS` / the low default
+`IP_THROTTLE_PER_MINUTE` never trips in normal dev use) - they only matter
+once this is a public URL sharing a tiny free-tier LLM budget across every
+visitor:
+
+- **`MAX_DAILY_JOBS`** — a *global* cap (not per-visitor) on new jobs
+  created in the last 24h, checked in `POST /research` and
+  `.../followups/escalate` before a job is created (`db.count_jobs_since`).
+  Global, not per-IP, because the thing actually being protected is the
+  shared quota itself — Gemini's `generate` bucket
+  (`shared/llm_rate_limiter.py`) is self-capped at roughly 20 requests/day
+  system-wide, so it doesn't matter whether it's one visitor or twenty
+  hitting it. Unset or `0` = unlimited.
+- **`IP_THROTTLE_PER_MINUTE`** — a coarse per-IP request throttle (default
+  6/min) on `POST /research`, `.../followups/escalate`, `/filings/upload`,
+  and `/filings/fetch` — blunts a crawler/bot burst before it even reaches
+  the daily cap. Hand-rolled in-memory (`app/main.py`'s `_ip_hits`), not
+  persisted — unlike the LLM quota tracker, this only needs to survive one
+  process's lifetime, not a restart.
 
 ## Running
 

@@ -15,6 +15,7 @@ import json
 import os
 import uuid
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Any, Iterator
 
 import psycopg2
@@ -141,6 +142,15 @@ def create_job(query: str, *, conversation_id: str | None = None, parent_job_id:
         )
         conn.commit()
     return job_id
+
+
+def count_jobs_since(cutoff: datetime) -> int:
+    """How many research_jobs rows were created at or after `cutoff` - backs
+    the deployment-only daily job cap in app/main.py (protects the shared
+    free-tier LLM quota from a public URL getting hammered)."""
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM research_jobs WHERE created_at >= %s", (cutoff,))
+        return cur.fetchone()[0]
 
 
 def update_job(job_id: str, **fields: Any) -> None:
