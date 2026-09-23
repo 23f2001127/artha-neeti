@@ -162,6 +162,22 @@ body {
   border-radius: var(--radius-sm);
 }
 
+/* Text inputs/textareas that already show focus via their own border-color
+   change (Tailwind's `outline-none focus:border-...` / `focus-within:border-
+   ...` pattern, used throughout QueryView/UploadFilingPanel/FollowUpPanel)
+   need this rule to actually win. Confirmed live that it wasn't: Tailwind
+   v4 emits `.outline-none` inside `@layer utilities`, and per the CSS
+   cascade an unlayered rule (the plain :focus-visible above) always beats a
+   layered one regardless of specificity or source order - so every one of
+   those inputs was silently getting BOTH its own border-color focus AND
+   this global ring at once, overlapping into the double-border look. Higher
+   specificity (.outline-none:focus-visible) than the bare :focus-visible
+   above, and both are unlayered, so this one wins on the elements that
+   opted out with outline-none. */
+.outline-none:focus-visible {
+  outline: none;
+}
+
 .tnum {
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum" 1;
