@@ -12,3 +12,6 @@ data/uploads/
 
 # daily ingestion logs (see scripts/daily_ingest.ps1)
 logs/
+
+# test tooling
+.pytest_cache/

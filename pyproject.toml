@@ -1,0 +1,12 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers --import-mode=importlib"
+markers = [
+    "live: calls external APIs and consumes quota; skipped unless --live is given",
+    "e2e: full multi-agent pipeline runs; very quota-heavy even under --live",
+    "pace(seconds): sleep after the test in --live runs to stay under provider rate limits",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
