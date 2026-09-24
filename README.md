@@ -1,269 +1,216 @@
-# ArthaNeeti
+<p align="center">
+  <img src="assets/brand/lockup.png" alt="ArthaNeeti" width="300">
+</p>
 
-A multi-agent AI system for Indian equity research. Given a natural-language question about NSE-listed companies, a **LangGraph planner** decides which company (or companies) the query is about, which of three specialist agents can actually answer it, and runs them — each one grounded in real tools rather than model memory: live market data from yfinance, news and sentiment from a search API, and retrieval over the actual text of company annual reports. A synthesis step reconciles the specialists' outputs, flags where they disagree, and returns a structured report where **every claim carries its source and its caveat**.
-
-The name is Sanskrit — *artha* (wealth, meaning) + *nīti* (policy, method).
-
----
-
-## What it does
-
-Ask it something like *"give me a complete research view on TCS"* or *"compare TCS and Infosys on fundamentals, sentiment and risk profile"* and it will:
-
-1. **Route** — resolve the company names to NSE tickers (confirming each one exists), decide single-company vs. comparison mode, and select only the specialists the question needs. *"What's Reliance's current stock price"* calls one agent; *"complete research view"* calls all three. Every skip is recorded with a reason.
-2. **Gather** — run the selected specialist agents. Each is a ReAct agent that chooses which of its MCP server's tools to call.
-3. **Synthesize** — merge each company's specialist outputs into one report: an executive summary, per-section detail, explicitly flagged conflicts (*"strong fundamentals vs. negative recent sentiment — not a contradiction, different time horizons"*), a per-claim source-and-caveat map, and an honest list of what's missing.
-4. **Compare** — for multi-company queries, a final pass over the finished reports produces a dimension-by-dimension comparison (profitability, valuation, leverage, risk profile…) without manufacturing a winner where the data doesn't support one.
-
-The output includes the full **routing trace** and **provenance** — not just the answer, but which specialists ran, why the others didn't, and where every number came from.
+<p align="center">
+  Equity research on NSE-listed companies, assembled by a team of AI agents from
+  live market data, recent news and the companies' own annual reports.
+</p>
 
 ---
+
+ArthaNeeti turns a plain-English question into a cited research report. Ask
+*"Give me a complete research view on TCS"*, *"TCS or Infosys, which is the
+better investment right now?"* or *"I hold equal amounts of TCS and Infosys, how
+diversified is this?"* and a planner routes the question to specialist agents,
+each grounded in real data sources, then merges their findings into a single
+report with charts, sources for every claim, and the points where the sources
+disagree.
+
+The name is Sanskrit: *artha* (wealth) and *nīti* (policy, method).
+
+## Features
+
+- **Three report types.** Single-company research, side-by-side comparisons,
+  and portfolio reviews with weighted valuation metrics and sector exposure.
+- **Grounded specialists.** Market data from yfinance, news and sentiment from
+  web search with LLM classification, and retrieval over the text of annual
+  reports with page citations.
+- **Selective routing.** Only the specialists a question needs are run, and
+  every skipped source is listed with the reason.
+- **Conflicts made visible.** When sources disagree (strong fundamentals,
+  negative sentiment), the report says so and explains whether it is a real
+  contradiction or a difference in time frame.
+- **Charts and a PDF.** Share price, returns, revenue and profit, margins,
+  sentiment and peer metrics, on the web dashboard and in a downloadable report.
+- **Live progress.** The research plan appears within seconds, and each
+  specialist's status updates as it works.
+- **Follow-up questions.** Answered from the finished report in one call, or
+  turned into a new research run when the report can't answer them.
+- **Any annual report.** Upload a company's annual report, or let ArthaNeeti
+  find it, to add annual-report analysis for that company.
 
 ## Architecture
 
 ```mermaid
-flowchart TD
-    Q[User query] --> R
+flowchart LR
+    UI["Web app<br/>React + Vite"] -->|"/api"| API["FastAPI<br/>job API"]
+    API --> PL
 
-    subgraph P["Planner · LangGraph StateGraph"]
+    subgraph PL["Planner (LangGraph)"]
         direction TB
-        R["<b>route</b><br/>resolve companies → NSE tickers,<br/>pick which specialists the query needs"]
-        R --> G["<b>gather</b><br/>bounded-concurrency fan-out<br/>to the selected specialists"]
-        G --> SY["<b>synthesize</b><br/>reconcile each company's outputs<br/>into one cited report"]
-        SY --> CM["<b>compare</b><br/>cross-company dimensions<br/>(multi-company queries only)"]
+        R[route] --> G[gather] --> S[synthesize] --> C["compare or<br/>portfolio"] --> F[finalize]
     end
 
-    G --> MDA["Market Data Agent"] --> M1[["market-data-mcp<br/>4 tools"]] --> YF(("yfinance"))
-    G --> NSA["News + Sentiment Agent"] --> M2[["research-mcp<br/>4 tools"]] --> TV(("Tavily + Gemini"))
-    G --> FA["Filings Agent"] --> M3[["filings-rag-mcp<br/>3 tools"]] --> PG[("Postgres + pgvector<br/>3,980 chunks / 10 reports")]
+    G --> MA["Market data agent"] --> M1[["market-data-mcp"]] --> YF(("yfinance"))
+    G --> NA["News & sentiment agent"] --> M2[["research-mcp"]] --> TV(("Tavily + Gemini"))
+    G --> FA["Annual report agent"] --> M3[["filings-rag-mcp"]] --> PG[("Postgres + pgvector")]
 
-    SY --> OUT["Structured research report<br/>plus routing + provenance trace"]
-    CM --> OUT
+    API --> DB[("Postgres<br/>jobs and reports")]
+    API --> V["Charts and PDF<br/>app/visuals.py, app/report_pdf.py"]
 ```
 
-**The layers, and why they're separate:**
+- **API** (`app/`): research runs take minutes, so they are jobs. `POST
+  /research` returns a job id immediately; clients poll for routing, progress
+  and the report. Chart data is computed from market data without an LLM.
+- **Planner** (`agents/planner.py`): a LangGraph graph that routes the
+  question, runs specialists with bounded concurrency, synthesizes one report
+  per company, then compares companies or analyses the portfolio.
+- **Specialist agents** (`agents/`): ReAct agents on Groq, each connected to one
+  MCP server over stdio, returning structured findings with provenance.
+- **MCP servers** (`mcp_servers/`): eleven tools across three servers, usable by
+  any MCP client.
+- **Rate limiter** (`shared/`): one cross-process ledger that paces every LLM
+  call against the shared free-tier quotas.
 
-| Layer | What | Why it's its own thing |
-|---|---|---|
-| **API** (`app/`) | FastAPI. `POST /research` creates a job and returns immediately; the Planner runs as a background task; `GET /research/{id}` is polled for live progress. Job state (routing trace, per-specialist status, final report) is persisted to Postgres as the graph advances. | A query takes 1–20+ minutes — it cannot be a blocking request. The graph exposes intermediate state through a small progress callback, so a client sees the routing decision seconds in and each specialist finish as it happens. |
-| **Planner** (`agents/planner.py`) | A LangGraph `StateGraph`: `route → gather → synthesize → [compare] → finalize`, with a typed state and conditional edges. | Orchestration is a distinct concern from any single agent. The planner decides *what to fetch*; specialists decide *how*. |
-| **Specialist agents** (`agents/*_agent.py`) | Market Data, News & Sentiment, Filings. Each is a Groq-backed ReAct agent wrapping exactly one MCP server, with a structured-output synthesis step and a provenance extractor. | Each domain has its own tools, caveats, and failure modes. A shared `_base.py` (~300 lines) holds everything that doesn't change between them. |
-| **MCP servers** (`mcp_servers/*/`) | 11 tools across 3 stdio servers. Framework-agnostic core logic, thin MCP wrapper, `{"error": "..."}` on failure (never raises), `as_of` timestamps on success. | The tool layer is reusable and independently testable. Agents connect as real MCP clients over stdio — the same way any MCP host would. |
-| **Shared infra** (`shared/`) | A cross-process rate limiter over the account-wide Gemini and Groq quotas. | Multiple agent processes and MCP servers share one API key per provider. The limiter is the only thing that sees the whole picture. |
+## Repository layout
 
----
-
-## What makes this a real system, not a demo
-
-**A cross-process rate limiter that actually coordinates concurrent work.** Every hosted-LLM call in the codebase — Groq reasoning, Gemini sentiment classification, Gemini embeddings — goes through `shared/llm_rate_limiter.py`, a SQLite ledger using WAL mode and `BEGIN IMMEDIATE` as a cross-process write lock. It enforces per-minute *and* per-day limits on requests *and* tokens, with a shared bucket for Groq's model-fallback chain (Groq rate-limits account-wide, so per-model buckets would admit calls the API then rejects). It blocks and paces rather than failing, and raises a clean `QuotaExceededError` with a "resets in ~Nh" message when a wall is genuinely hit. The free-tier per-minute token ceiling was measured, not taken from the headers — the docs advertise ~8k tokens/min for these models; sustained multi-agent load 429s at ~5k.
-
-**A RAG pipeline over real filings with page-level citation.** 10 actual annual-report PDFs (Reliance, TCS, M&M, HDFC Bank, Infosys, L&T, and four more — FY2024-25, TCS FY2025-26), **3,291 pages → 3,980 chunks**, embedded with Gemini at 768 dimensions (Matryoshka-truncated and L2-normalized, because pgvector's HNSW index caps at 2,000 dims) into Supabase Postgres + pgvector. Chunking is page-anchored — one chunk per page, split only when a page exceeds ~1,100 tokens — so every retrieved passage cites a real page number. **41% of chunks are flagged `may_contain_tabular_data`** (via a numeric-density heuristic), and the Filings Agent hedges any figure that comes from a flagged chunk instead of stating a PDF-flattened table value with false precision. Ingestion ran on the free tier (~1,000 embeddings/day) over five resumable daily passes, coordinated by a Windows scheduled task.
-
-**Entity disambiguation for Indian conglomerate structures.** "Mahindra" matches Tech Mahindra and Mahindra Finance; "Tata" matches a dozen listed entities; a naive news search for M&M returns Tech Mahindra earnings. `research-mcp` carries `_KNOWN_ALIASES` plus `_GROUP_COMPANY_PATTERNS` — regexes that blank out group-company names *before* the alias match — so "Tech Mahindra Q4 results" resolves to `mentions_company: false` for M&M. Aggregate sentiment reports `breakdown_on_company` (only articles that actually name the target) as the trustworthy number, separately from the raw, entity-contaminated count.
-
-**Provenance that survives the whole pipeline.** `as_of` dates, `fiscal_year`, `roe_source` (reported vs. computed), the "NOT the NSE/BSE official feed" disclaimer, the single-filing-year limitation — these are lifted from raw MCP tool output into a structured `provenance` block by each agent, carried into the synthesis prompt, and re-emitted in the final report's `sources_by_claim` map: `{claim → {sources: [...], caveat: "..."}}`. The synthesis step is instructed and tested to attach the *strongest* upstream hedge to any claim it repeats — a carefully qualified finding never gets laundered into a confident one. It also reconciles the fiscal-year gap between yfinance (latest FY) and the filings (a fixed prior year) rather than silently merging them.
-
----
+| Path | Contents |
+| --- | --- |
+| [`agents/`](agents/README.md) | Planner, specialist agents, synthesis and follow-up agents |
+| [`app/`](app/README.md) | FastAPI service, job runner, chart data and PDF export |
+| [`mcp_servers/`](mcp_servers/README.md) | Market data, research and filings MCP servers |
+| [`shared/`](shared/README.md) | Cross-process LLM rate limiter |
+| [`frontend/`](frontend/README.md) | React web app |
+| [`tests/`](tests/README.md) | Unit tests and opt-in live integration tests |
+| [`docker/`](docker/README.md) | Container images and nginx configuration |
+| [`scripts/`](scripts/README.md) | Brand asset generation and scheduled ingestion |
+| [`assets/`](assets/README.md) | Logo source files and fonts |
+| [`data/`](data/README.md) | Local annual-report PDFs (not committed) |
 
 ## Tech stack
 
-**Orchestration & agents** — LangGraph 1.2 (`StateGraph`), LangChain 1.3, Model Context Protocol (`mcp` 2.1, stdio transport)
-**LLMs** — Groq (`openai/gpt-oss-120b` + fallback chain) for agent reasoning; Google Gemini (`gemini-3-flash-preview`) for sentiment classification; `gemini-embedding-001` for filings embeddings
-**Data & retrieval** — PostgreSQL + pgvector (Supabase), `psycopg2`, `pypdf`
-**External data** — yfinance (market data), Tavily (news search)
-**Backend** — FastAPI (job-based API — a query is submitted, runs as a background task, and is polled for live progress), Uvicorn · **Frontend** — a web UI (planned)
-**Language** — Python 3.11
+| Area | Technology |
+| --- | --- |
+| Agents | LangGraph, LangChain, Model Context Protocol (stdio) |
+| Models | Groq `openai/gpt-oss-120b` with fallbacks; Gemini for sentiment and embeddings |
+| Data | yfinance, Tavily, PostgreSQL with pgvector (Supabase) |
+| Backend | Python 3.11, FastAPI, Uvicorn, reportlab |
+| Frontend | React 19, Vite, Tailwind CSS 4, Recharts |
+| Delivery | Docker, nginx, Render, Vercel |
 
-The Groq-for-reasoning / Gemini-for-classification-and-embeddings split is deliberate: Groq's free tier gives ~950 requests/day per model and is fast (~1s/call), which suits the 3–5 calls each agent query burns; Gemini's structured-output mode and embedding API cover what Groq doesn't offer.
+## Getting started
 
----
-
-## Current status
-
-**The backend is functionally complete and verified.**
-
-| Component | Status |
-|---|---|
-| `market-data-mcp` · `research-mcp` · `filings-rag-mcp` | ✅ built, tested, committed |
-| Filings RAG ingestion | ✅ complete — all 10 reports, 3,980 chunks in pgvector |
-| `shared/llm_rate_limiter.py` | ✅ built, concurrent-scenario tested |
-| Market Data · News & Sentiment · Filings · Synthesis agents | ✅ built, each with a standalone test asserting tool choice *and* caveat fidelity |
-| LangGraph Planner | ✅ built; all four routing/execution patterns verified end-to-end (single-tool, full single-company, corpus-miss graceful skip, multi-company comparison) |
-| FastAPI service layer | ✅ built — job-based API (queries take minutes), live progress via Postgres, tested |
-| React frontend | ✅ built — landing page, live agent-trace progress view, cited report view, dark/light theme |
-| Filings beyond the seeded 10 (upload + auto-fetch) | ✅ built — `POST /filings/upload` (a PDF you have) and `POST /filings/fetch` (best-effort web search + download), both wired into Planner routing and `GET /companies` |
-| Real progress (routing live, per-tool-call stages, historical ETA) | ✅ built — no more static spinner or hardcoded time estimate; see `app/README.md`'s "How live progress works" |
-| Follow-up conversational queries | ✅ built — cheap synchronous answers grounded in a finished report, escalating to a real Planner run only when asked; see `app/README.md`'s "Follow-up conversations" |
-| Portfolio-level analysis | ✅ built — a new Planner mode for "I hold X and Y" style questions: weighted P/E/ROE/dividend yield and sector allocation computed in code, diversification/concentration reasoning in one LLM call; see `agents/README.md`'s "portfolio node" |
-| UI/branding polish (social-share preview, favicon completion, keyboard focus, example-reports gallery, real PDF export) | ✅ built — see `frontend/README.md`'s "Brand assets" + `app/README.md`'s "PDF export" |
-| Deployment | 🟡 code/config ready (CORS lockdown, daily quota + IP throttle, `render.yaml`, `vercel.json` — see "Deploying" below); not yet live |
-
-Each component has its own README with the design decisions, test evidence, and known limitations (`mcp_servers/*/README.md`, `agents/README.md`, `shared/README.md`). The agent tests are runnable scripts that print full reasoning traces and structured output, not just pass/fail.
-
-Honest caveats, stated plainly: everything runs on **free API tiers**, so a full multi-company query takes ~15–20 minutes (the rate limiter paces it) and can partially degrade if a heavy agent hits a quota wall mid-run — the planner is built to produce a coherent report from whatever subset succeeded and say what's missing. The filings corpus is a single year per company. Sentiment scores are the classifier's self-reported confidence, not calibrated probabilities. None of this is hidden; it's surfaced in the output.
-
----
-
-## Running it locally
-
-**Prerequisites:** Python 3.11, a PostgreSQL database with the `vector` extension (a free Supabase project works), and API keys for Groq, Google Gemini, and Tavily (all have free tiers).
+You need API keys for [Groq](https://console.groq.com),
+[Google Gemini](https://aistudio.google.com) and [Tavily](https://tavily.com),
+all of which have free tiers, and a PostgreSQL database with the `vector`
+extension (a free [Supabase](https://supabase.com) project works).
 
 ```bash
 git clone https://github.com/23f2001127/artha-neeti.git
 cd artha-neeti
-python -m venv venv
-venv\Scripts\activate            # Windows;  source venv/bin/activate on Unix
-pip install -r requirements.txt
+cp .env.example .env        # then fill in the four required values
 ```
 
-Create `.env` in the repo root (see `.env.example` for the full list,
-including optional tuning vars — these four are the only required ones):
-
-```env
-GROQ_API_KEY=...
-GEMINI_API_KEY=...
-TAVILY_API_KEY=...
-DATABASE_URL=postgresql://user:pass@host:5432/dbname
-```
-
-**Ingest the filings** (one-time; place the annual-report PDFs in `data/filings/` as `TICKER_AR_YYYY-YY.pdf`). Idempotent and resumable — on the free embedding tier it stops cleanly at the daily cap and continues on the next run:
+### With Docker
 
 ```bash
-python -m mcp_servers.filings_rag_mcp.ingest            # all filings
+docker compose up --build
+```
+
+The web app runs at <http://localhost:8080> and the API at
+<http://localhost:8000> (interactive docs at `/docs`). See
+[`docker/README.md`](docker/README.md) for running a local database as well.
+
+### Without Docker
+
+Backend (Python 3.11):
+
+```bash
+python -m venv venv
+source venv/bin/activate            # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload
+```
+
+Frontend (Node 20 or later), in a second terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev                         # http://localhost:5173
+```
+
+### Indexing annual reports
+
+Annual-report analysis needs each company's report in the vector index. Add
+reports from the web app (**Add a company** on the research page), through the
+API, or in bulk from PDFs placed in `data/filings/`:
+
+```bash
+python -m mcp_servers.filings_rag_mcp.ingest            # index every PDF, resumable
 python -m mcp_servers.filings_rag_mcp.ingest --status   # progress
 ```
 
-**Run the Planner** on a query:
+The free Gemini tier embeds about 1,000 passages a day, so a large batch takes
+several daily runs; [`scripts/daily_ingest.ps1`](scripts/README.md) automates
+that on Windows.
+
+## Using the API
 
 ```bash
-python agents/planner.py "give me a complete research view on TCS"
+curl -X POST localhost:8000/research -H "Content-Type: application/json" \
+     -d '{"query": "Give me a complete research view on TCS"}'
+# {"job_id": "...", "status": "queued"}
+
+curl localhost:8000/research/<job_id>              # progress, then the report
+curl -o report.pdf localhost:8000/research/<job_id>/report.pdf
 ```
 
-Or use it as a library:
+The full endpoint reference is in [`app/README.md`](app/README.md).
 
-```python
-from agents.planner import plan_sync
-report = plan_sync("compare TCS and Infosys on fundamentals and risk profile")
-```
-
-**Run the API** (a query takes minutes, so it's job-based — submit, then poll):
+## Testing
 
 ```bash
-uvicorn app.main:app --reload           # http://127.0.0.1:8000  ·  docs at /docs
-
-curl -X POST localhost:8000/research -H 'content-type: application/json' \
-     -d '{"query": "what is Reliance'\''s current stock price"}'
-# -> {"job_id": "...", "status": "queued"}
-
-curl localhost:8000/research/<job_id>   # status, routing_trace (early), specialist_status (live), report (when done)
-
-# ask a follow-up on a finished report - fast, one LLM call, no polling
-curl -X POST localhost:8000/research/<job_id>/followups -H 'content-type: application/json' \
-     -d '{"query": "what was its ROE again?"}'
-curl localhost:8000/companies           # full vs partial coverage
-curl localhost:8000/status              # live LLM-quota usage per provider bucket
-
-# a company outside the seeded 10 - upload its annual report, or let the system try to find it
-curl -X POST localhost:8000/filings/upload -F "ticker=ITC" -F file=@itc_annual_report.pdf
-curl -X POST localhost:8000/filings/fetch -H 'content-type: application/json' \
-     -d '{"ticker": "ITC", "company": "ITC Limited", "fiscal_year": "2024-25"}'
-curl localhost:8000/filings/jobs/<job_id>   # poll either one
+pip install -r requirements-dev.txt
+pytest                      # offline unit tests
+pytest --live               # also run integration tests against the real APIs
 ```
 
-**Run any component's tests** (each is a standalone script, not pytest):
+Live tests call the real providers and use free-tier quota; see
+[`tests/README.md`](tests/README.md).
 
-```bash
-python agents/test_planner.py routing        # routing decisions only — fast, ~4 LLM calls
-python agents/test_planner.py 2              # one full end-to-end case
-python app/test_api.py                       # the API, in-process, on a cheap job
-python agents/test_market_data_agent.py
-python mcp_servers/filings_rag_mcp/test_retrieval.py
-python shared/test_llm_rate_limiter.py
-```
+## Deployment
 
----
+The backend deploys to Render as a Docker web service and the frontend to
+Vercel as a static site, both on free plans, using the committed
+`render.yaml` and `vercel.json`.
 
-## Deploying
+1. **Render:** create a Blueprint from this repository. In the service's
+   environment settings, add `GROQ_API_KEY`, `GEMINI_API_KEY`,
+   `TAVILY_API_KEY` and `DATABASE_URL`. Note the service URL once deployed.
+2. **Vercel:** import the repository and set `VITE_API_BASE_DIRECT` to the
+   Render URL. Note the site URL once deployed.
+3. **Render:** set `CORS_ALLOWED_ORIGINS` to the Vercel URL.
 
-Free hosting throughout: frontend on [Vercel](https://vercel.com), backend
-on [Render](https://render.com)'s free web service. Both read config
-already committed in this repo (`vercel.json`, `render.yaml`) — no manual
-dashboard setup beyond pasting secrets and one URL back and forth.
+`MAX_DAILY_JOBS` and `IP_THROTTLE_PER_MINUTE` (set in `render.yaml`) protect the
+shared LLM quota on a public deployment. Render's free plan sleeps after 15
+minutes without traffic and takes up to a minute to wake.
 
-**The real constraint driving all of this:** the free-tier LLM quotas this
-project runs on are small and *shared* — Gemini's `generate` bucket
-(`shared/llm_rate_limiter.py`) self-caps at roughly 20 requests/day,
-system-wide, and a single research query alone makes several of those
-calls. A public URL with no protection would let a handful of visitors, or
-one crawler, exhaust an entire day's quota for everyone. `app/main.py`
-ships two deployment-only safety limits for exactly this (both no-ops
-locally — see `app/README.md`'s "Deployment safety limits"): a global daily
-cap on new research jobs (`MAX_DAILY_JOBS`), and a per-IP request throttle
-(`IP_THROTTLE_PER_MINUTE`).
+## Limitations
 
-1. **Backend, on Render**: New → Blueprint → connect this GitHub repo.
-   Render reads `render.yaml` and creates the web service. In the
-   service's *Environment* tab, paste the real secrets — the same four
-   required values from `.env.example` (`GROQ_API_KEY`, `GEMINI_API_KEY`,
-   `TAVILY_API_KEY`, `DATABASE_URL`) — Render never gets these from the
-   repo itself. Deploy, note the resulting `https://*.onrender.com` URL.
-   (Free tier spins down after 15 minutes idle and takes ~30-60s to wake on
-   the next request — a known, accepted trade-off, not a bug; see
-   `feature-roadmap` reasoning if you ever need the always-on upgrade path,
-   e.g. an Oracle Cloud Always Free VM.)
-2. **Frontend, on Vercel**: New Project → import the same repo. Vercel
-   reads `vercel.json` (builds `frontend/`, no root-directory clicking
-   needed). Add one environment variable: `VITE_API_BASE_DIRECT` = the
-   Render URL from step 1 (this is read at *build* time, see
-   `frontend/.env.example`). Deploy, note the resulting
-   `https://*.vercel.app` URL.
-3. **Back on Render**: set `CORS_ALLOWED_ORIGINS` to the Vercel URL from
-   step 2 (comma-separated if you ever add a second frontend origin, e.g. a
-   preview deployment) — saving it triggers an automatic redeploy.
-4. Smoke-test the live site: submit a real query, watch it run, confirm
-   the finished report renders and the PDF downloads.
-
-The existing Supabase database (already holding the ingested filings
-corpus) is reused as-is — no separate production database.
-
----
-
-## Roadmap
-
-- [x] `market-data-mcp` — yfinance tools with average-basis ratio fallback + provenance
-- [x] `research-mcp` — Tavily news/sentiment with entity-aware filtering + Gemini classification
-- [x] `filings-rag-mcp` — ingestion, page-anchored chunking, pgvector retrieval with cited pages
-- [x] Filings RAG ingestion — 10 annual reports, 3,980 chunks
-- [x] `shared/llm_rate_limiter.py` — cross-process quota coordination
-- [x] Market Data Agent
-- [x] News & Sentiment Agent
-- [x] Filings Agent
-- [x] Synthesis Agent — conflict flagging + per-claim provenance
-- [x] LangGraph Planner — selective routing, single-company + multi-company comparison
-- [x] FastAPI service layer — job-based API, live progress persisted to Postgres
-- [x] React frontend — landing page, live agent-trace view, cited report view
-- [x] Filings beyond the seeded 10 — manual upload and best-effort web auto-fetch
-- [x] Real progress — structured routing pushed live, per-tool-call stage text
-      instead of a static spinner, a historical-data-driven ETA, `GET /status`
-      for live quota visibility
-- [x] Follow-up conversational queries — answered from the finished report
-      when possible (one cheap LLM call, no wait), escalating to a real
-      Planner run only when the user confirms it's needed
-- [x] Portfolio-level analysis — "I hold X and Y" questions get a genuinely
-      different lens than a head-to-head comparison: weighted valuation
-      metrics and sector allocation computed in code, diversification/
-      concentration reasoning in the LLM, explicitly not a quant risk model
-- [x] UI/branding polish pass — social-share preview (OG image + meta
-      tags), completed favicon (PNG fallbacks, apple-touch-icon, web
-      manifest), keyboard-focus visibility, a curated example-reports
-      gallery on the landing page, and a real generated PDF download
-      (pure-Python `xhtml2pdf`, not a print dialog)
-- [ ] Deployment
+- On free API tiers a single-company report takes about 5 to 10 minutes and a
+  comparison 20 to 30, because every LLM call is paced to stay within quota.
+- Each company has one indexed annual report, so filings analysis covers a
+  single year; multi-year trends come from market data.
+- Sentiment scores are the classifier's own confidence, not calibrated
+  probabilities, and cover a sample of recent coverage.
+- Reports are for information only and are not investment advice.
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE)
 
----
+## Author
 
-*Built as a portfolio project. The engineering decisions — and their trade-offs — are documented in the component READMEs; that discussion is the point.*
+Designed and built by **Antareep Ghosh** ([GitHub](https://github.com/23f2001127)).

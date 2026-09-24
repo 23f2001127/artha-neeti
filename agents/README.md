@@ -1,490 +1,172 @@
-# agents/
+# agents
 
-The specialist agents plus the Planner that orchestrates them. The first three
-each wrap **one** MCP server; Synthesis merges their outputs; the **Planner**
-(`planner.py`) is a LangGraph `StateGraph` that routes a raw query to the right
-subset of specialists and runs the whole pipeline end to end. Every agent also
-runs standalone.
+The research pipeline: a LangGraph planner, three specialist agents that each
+work through one MCP server, and two single-call agents that write the report
+and answer follow-up questions.
 
-| agent | input | file |
-|---|---|---|
-| Market Data Agent | `market-data-mcp` | `market_data_agent.py` |
-| News & Sentiment Agent | `research-mcp` | `news_sentiment_agent.py` |
-| Filings Agent | `filings-rag-mcp` | `filings_agent.py` |
-| Synthesis Agent | the three agents' output dicts | `synthesis_agent.py` |
-| **Planner** | a raw user query | `planner.py` |
+| Module | Role | Works from |
+| --- | --- | --- |
+| `planner.py` | Routes a question and runs the whole pipeline | The user's question |
+| `market_data_agent.py` | Prices, valuation, ratios, peers | market-data-mcp |
+| `news_sentiment_agent.py` | Recent news, sentiment, announcements | research-mcp |
+| `filings_agent.py` | Annual-report disclosures with page citations | filings-rag-mcp |
+| `synthesis_agent.py` | Merges specialist findings into one report | Specialist outputs |
+| `followup_agent.py` | Answers follow-up questions about a report | A finished report |
+| `_base.py` | Shared model, MCP bridge and agent driver | |
 
-The shared machinery — MCP stdio client, the Groq-backed `create_react_agent`
-through `shared/llm_rate_limiter.py`, the model-fallback chain, MCP→LangChain tool
-bridging, trace extraction, and the `run_agent` driver — lives in **`agents/_base.py`**.
-An MCP agent module is just: a server path, a system prompt, a synthesis step
-(structured-output schema + instructions), and a provenance extractor. Two
-opt-in `run_agent` knobs exist for heavier domains: `compact_tool_result(tool,
-payload)` shrinks what the ReAct loop sees per tool call (the full payload still
-feeds `raw_data`/provenance), and `recursion_limit` caps the tool-call budget.
-The Filings Agent uses both. The Synthesis Agent reuses only `make_model`,
-`flatten_exc` and the structured-output pattern — not `run_agent` (see its section).
+## Models
 
-## Which LLM does what (a deliberate split)
+| Work | Model | Why |
+| --- | --- | --- |
+| Agent reasoning and report writing | Groq `openai/gpt-oss-120b`, then `qwen/qwen3.8-27b`, `openai/gpt-oss-20b`, `openai/gpt-oss-safeguard-20b` | Fast, with a daily free allowance large enough for the 3 to 5 calls each agent makes |
+| News sentiment (in research-mcp) | Gemini `gemini-3-flash-preview` chain | Structured classification at low volume |
+| Annual-report embeddings (in filings-rag-mcp) | Gemini `gemini-embedding-001` | Groq has no embedding API |
 
-| layer | provider / model | why |
-|---|---|---|
-| **Agent reasoning** — ReAct tool-selection loop + result synthesis | **Groq** — `openai/gpt-oss-120b`, fallbacks `qwen/qwen3.8-27b`, `openai/gpt-oss-20b`, `gemma2-9b-it` | Each agent query burns 3–5 LLM calls, and there will be several agents. Gemini's free-tier *generate* quota is **~20 requests/day/model** — it dried up during a single afternoon of development. Groq's free tier is **~1,000 requests/day/model** (the real per-minute cap measures ~5k tokens, and the shared limiter paces for it). Fast, too: ~1 s/call. |
-| **News sentiment** (`research_mcp.get_sentiment`) | **Gemini** — `gemini-3-flash-preview` chain | Structured-output classification over short text; low call volume (1–2 per `get_sentiment`). Gemini's ~20/day is tolerable here, and its structured-output mode is convenient. Not worth moving. |
-| **Filing embeddings** (`filings_rag_mcp`) | **Gemini** — `gemini-embedding-001` (768-dim) | Groq does not offer an embedding API. This has to be Gemini (or a local model, which was deliberately rejected — see that server's README). |
+Every model in the Groq chain must support tool calling. `GROQ_AGENT_MODEL`
+overrides the primary. All LLM calls go through the shared rate limiter
+([`shared/`](../shared/README.md)); Groq limits by account, so one bucket
+covers the whole chain.
 
-`llama-3.3-70b-versatile` — the obvious "big open model on Groq" — **was retired**
-from this account's model list (Groq's lineup rotates). `openai/gpt-oss-120b` is
-the current large general reasoner; verified tool-calling works.
+## Shared machinery (`_base.py`)
 
-**All go through `shared/llm_rate_limiter.py`** — one cross-process SQLite
-ledger. Gemini is bucketed per model; **Groq is one shared `"groq"` bucket**
-across the whole fallback chain (its free tier rate-limits account-wide).
-Nothing in the codebase calls a hosted LLM outside the limiter's awareness.
-Quota profiles it enforces (free tier, 2026-09, re-verify — these drift):
+A specialist module supplies a server path, a system prompt, a structured
+synthesis step and a provenance extractor. `_base.py` provides the rest:
 
-| bucket | per minute | per day |
-|---|---|---|
-| `groq` (one shared bucket) | ~27 req / **~5k tokens** (measured, binding) | ~950 req / ~350k tokens |
-| `generate:*` (Gemini) | ~5 req | **~20 req** (binding) |
-| `embed` (Gemini) | 100 req / 30k tokens | **1,000 req** (binding) |
+- **`RateLimitedChatGroq`**: every call reserves quota first. Before sending,
+  requests are fitted under Groq's per-request limit (8,000 tokens of input plus
+  output, the same for every model) by shortening the largest tool results.
+  Failures are handled by kind:
+  - rate limit: move to the next model;
+  - request too large: refit once with a tighter budget, then fail with
+    `RequestTooLargeError`;
+  - malformed tool call: retry once, then move to the next model.
+- **`load_mcp_tools`**: turns each MCP tool's JSON schema into a LangChain
+  `StructuredTool` that calls the server over stdio.
+- **`run_agent`**: spawns the server, runs `create_react_agent`, writes the
+  structured result and extracts a reasoning trace. `compact_tool_result`
+  shrinks what the model sees per tool call while `raw_data` keeps the full
+  payload; `on_stage` reports progress ("calling get_ratios…") to the planner.
+- **`describe_error`**: labels failures as a rate limit, an oversized request
+  or another error, so reports can explain a missing source accurately.
 
-A Cerebras last-resort fallback rung was tried and dropped (2026-09-17):
-Cerebras' free tier turned out to require a card on file for this account
-(`402 Payment required` on a live test call), which fails the project's
-zero-cost rule. Nothing here depends on it.
+## Specialist agents
 
-## `market_data_agent.py` — Market Data Agent
-
-Given a natural-language question about a listed Indian company's market data, it
-decides which of `market-data-mcp`'s 4 tools to call (often more than one), calls
-them, and returns a structured result for a future Synthesis Agent plus a
-human-readable summary.
-
-### How it's wired (the architecture rules, followed on purpose)
-
-| concern | choice |
-|---|---|
-| **MCP** | Spawns `mcp_servers/market_data_mcp/server.py` as a subprocess and talks to it as an **MCP stdio client** (`mcp.client.Client` + `StdioServerParameters`). It does **not** import `market_data.py`. The Planner will connect the same way. |
-| **MCP → LangChain** | `client.list_tools()` → each MCP tool's JSON `input_schema` is handed straight to a `StructuredTool` (`langchain-core` 1.6 accepts a schema dict), whose coroutine calls `client.call_tool(...)` and returns the structured content. No hand-written pydantic models, no `langchain-mcp-adapters` (not in requirements, and it predates `mcp` 2.x). |
-| **LLM** | Groq via `langchain-groq`, subclassed as `_RateLimitedChatGroq` so **every** call (the ReAct tool-selection loop *and* the final synthesis call) first clears `shared/llm_rate_limiter.py`. |
-| **Model resilience** | The subclass runs a fallback chain (`openai/gpt-oss-120b` → `qwen/qwen3.8-27b` → `openai/gpt-oss-20b` → `openai/gpt-oss-safeguard-20b`), sharing one `"groq"` limiter bucket; on a 429 **or a 413** it swaps `model_name` in place and retries the next under the same reservation — transparent to `create_react_agent`. If every candidate 429s/413s, `QuotaExceededError` is raised. `GROQ_AGENT_MODEL` overrides the primary. `gemma2-9b-it` held this last rung until Groq decommissioned it (confirmed live via a 400, not a 429 — `is_rate_error()` doesn't retry a non-rate error, so a call reaching a dead model in the chain failed outright instead of rotating past it). Two replacements were tried by actually exercising the ReAct tool-calling loop, not just a bare chat call: `llama-3.1-8b-instant` 404'd on this account's real model list despite looking right in Groq's docs; `allam-2-7b` is active and answers plain prompts, but **hard-fails every single time on a tool-calling request** — strictly worse than a decommissioned model, since every specialist call needs tool calling. `openai/gpt-oss-safeguard-20b` (a safety-policy-tuned gpt-oss-20b variant) is what actually works — confirmed calling `get_peer_comparison` correctly, on its own separate quota bucket. One structured-output schema slip surfaced in testing on a multi-company query (not repeated on retry) — treated as ordinary small-model brittleness at this last-resort rung, not disqualifying. |
-| **Agent graph** | `langgraph.prebuilt.create_react_agent(model, tools, prompt=...)` — the ReAct loop. A system prompt encodes the tool-selection rules ("valued vs fundamentals" → fundamentals **and** ratios; "compare X, Y, Z" → one `get_peer_comparison`, never per-peer). |
-| **Provenance** | `as_of` / `fiscal_year` / `roe_source` / `last_fiscal_year_end` / `computed` / `missing` from every tool response are lifted into a top-level `provenance` block, and the full response is kept in `raw_data`. The synthesis prompt requires findings to carry that provenance inline. The agent never silently drops it. |
-
-### Output shape
+Each exposes `run(query)` (async) and `run_sync(query)` and returns:
 
 ```python
 {
-  "query": "...",
-  "ticker": "TCS.NS", "company": "Tata Consultancy Services Limited",
-  "findings": ["TCS ROE is 47.74% (source: get_ratios, as_of 2026-09-04...)", ...],
-  "summary": "2-4 sentence human-readable summary",
+  "query": "...", "ticker": "TCS.NS", "company": "Tata Consultancy Services Limited",
+  "findings": ["..."], "summary": "...", "caveats": ["..."],
   "tools_called": ["get_fundamentals", "get_ratios"],
-  "tool_calls":  [{"tool": "...", "args": {...}}, ...],
-  "provenance":  {"get_ratios": {"as_of": "...", "fiscal_year": null, "computed": [], ...}},
-  "raw_data":    {"get_ratios": { <full MCP response> }, ...},
-  "reasoning_trace": [{"step": "tool_call", ...}, {"step": "tool_result", ...}, {"step": "agent_answer", ...}],
-  "model": "openai/gpt-oss-120b"
+  "provenance": {"get_ratios": {"as_of": "...", "fiscal_year": 2026, ...}},
+  "raw_data": {"get_ratios": {...}},
+  "reasoning_trace": [...], "model": "openai/gpt-oss-120b",
 }
 ```
-On failure: `{"query": ..., "error": "...", "tools_called": [...], "partial_raw_data": {...}}`
-(anyio/MCP `ExceptionGroup`s are unwrapped to the real leaf error).
 
-### Use
+A failure returns `{"query", "error", "tools_called", "partial_raw_data"}`.
 
-```python
-from agents.market_data_agent import run_sync, run
-result = run_sync("how is TCS valued compared to its fundamentals?")
-# or, inside an event loop / the Planner graph:
-result = await run("compare Reliance, TCS and M&M")
-```
+**Market data.** Chooses among four tools; valuation questions call both
+fundamentals and ratios, and comparisons use one peer-comparison call. Price
+histories are summarized (range, change, sampled closes) before the model sees
+them.
 
-### Test
+**News and sentiment.**
+- Company sentiment uses aggregate mode and reports `breakdown_on_company`, the
+  articles actually about the company. The score is presented as the
+  classifier's confidence, not as a probability.
+- Announcement results say they come from news search, not the exchange feed.
+- Articles about group companies (Tech Mahindra for M&M) are marked lower
+  confidence.
 
-```bash
-python agents/test_market_data_agent.py
-```
+**Annual report.** One retrieval call per question.
+- At most four chunks of 450 characters reach the model; full text stays in
+  `raw_data` for citation.
+- Every finding cites company, fiscal year and page.
+- Figures from chunks flagged `may_contain_tabular_data` are hedged.
+- `statement_basis` records whether figures are standalone or consolidated.
+- Year-on-year comparisons use one report's own current and prior-year columns.
 
-Drives the agent against three reasoning patterns and prints the reasoning trace
-+ full structured output for each, then asserts the right tools were chosen:
+## Synthesis (`synthesis_agent.py`)
 
-| query | expected tools | verified on Groq |
-|---|---|---|
-| "what's Reliance's current stock price?" | `get_fundamentals` (or `get_price_history`), **not** peer comparison | ✅ |
-| "how is TCS valued compared to its fundamentals?" | `get_fundamentals` **and** `get_ratios` | ✅ |
-| "compare Reliance, TCS, and M&M" | exactly `get_peer_comparison`, **no** per-company tools | ✅ |
-
-Tool-selection quality did not regress moving Gemini → Groq — the full
-3-pattern run used **13 Groq requests total** and passed all 12 checks. Costs
-~3–5 Groq calls per query; the script's docstring notes the token-per-minute
-pacing.
-
-## `news_sentiment_agent.py` — News & Sentiment Agent
-
-Answers questions about recent news, market sentiment, and corporate
-announcements for an Indian-listed company by picking the right `research-mcp`
-tool(s). Same wiring as above (`_base`). The hard part isn't tool selection —
-it's that research-mcp's tools carry real caveats that a naive agent would
-smooth into false confidence. This agent's system + synthesis prompts force it
-to respect them:
-
-| research-mcp tool | the caveat | what this agent does |
-|---|---|---|
-| `get_sentiment` | dual-mode (text vs aggregate); the raw `breakdown` counts off-entity articles and is inflated | passes a **ticker** so aggregate mode runs; reports `overall.label` + **`breakdown_on_company`** over `on_company_count` as *the* number, and notes when raw `breakdown` differs. `score` is stated as "self-reported confidence, not calibrated". Matches research-mcp's own README distinction. |
-| `get_corporate_announcements` | a keyword-scoped Tavily news search, **NOT** the NSE/BSE feed; `mentions_company` / `likely_announcement` flags; group-company bleed-through | findings **lead with `likely_announcement=true`** items; any unflagged item cited is tagged `"(lower confidence: not flagged on-company / no announcement keyword)"`; the `disclaimer` (keeping the "NOT the NSE/BSE official feed" phrase) and the entity-disambiguation risk (naming the actual noise, e.g. Tech Mahindra for M&M) go into a dedicated **`caveats`** list |
-| `get_company_news` | items flagged `mentions_company=false` may be a group company / peer | noted when relied on |
-
-Output adds a top-level **`caveats: list[str]`** to the usual
-`{ticker, company, findings, summary, tools_called, provenance, raw_data,
-reasoning_trace}` — non-empty whenever a tool carried a disclaimer. `provenance`
-lifts the caveat-bearing fields (`disclaimer`, `breakdown` vs
-`breakdown_on_company`, `likely_announcement_count`, per-item flag breakdowns)
-into structured form so the Synthesis Agent gets them without re-parsing prose.
+No tools and no ReAct loop: one structured call over the specialists' findings.
 
 ```python
-from agents.news_sentiment_agent import run_sync
-result = run_sync("what's the market sentiment on TCS right now")
+report = await synthesize(query, {"market_data": md, "news_sentiment": news, "filings": filings})
 ```
 
-### Test
+- `conflicts_flagged`: each disagreement between sources, with an assessment of
+  whether it is a contradiction or a difference of lens (trailing figures
+  against a recent event, different fiscal years).
+- `sources_by_claim`: each key claim with its sources and the strongest
+  upstream caveat.
+- `unavailable`: sources that failed, with a reader-facing reason, and those not
+  routed for this question.
+- Market data (latest fiscal year) and the annual report (a fixed earlier year)
+  are never merged without stating the period gap.
 
-```bash
-python agents/test_news_sentiment_agent.py
+## Follow-ups (`followup_agent.py`)
+
+One structured call over a finished report and up to eight prior turns. It
+either answers from the report, keeping the relevant caveat, or returns
+`sufficient_data: false` with a reason and a `standalone_query` whose
+references ("its", "that company") are resolved, ready to start a new run. It
+sees only the finished report, not raw tool output.
+
+## Planner (`planner.py`)
+
+```
+START → route → gather → synthesize → [compare | portfolio] → finalize → END
 ```
 
-Three patterns, asserting tool choice **and** caveat fidelity (not just prose):
+| Node | Work |
+| --- | --- |
+| route | One LLM call resolves companies to NSE tickers, picks single, comparison or portfolio mode, and selects specialists per company with a reason for each skip. Unknown tickers get a lightweight yfinance existence check. Annual-report analysis is only routed for companies whose report is indexed. |
+| gather | Runs the selected (company, specialist) pairs with bounded concurrency. A failing specialist becomes an error cell, not a crash. |
+| synthesize | One synthesis call per company. |
+| compare | Comparisons: verdict, dimension-by-dimension assessment and caveats over the finished reports. |
+| portfolio | Portfolios: weights are resolved during routing (given weights normalized to 100, otherwise equal weights, always stated). Weighted P/E, ROE, dividend yield and sector allocation are computed in code; one LLM call writes the narrative, diversification, concentration risks and caveats. It is a composition review, not a correlation or volatility model. |
+| finalize | Assembles the report, routing rationale and sentiment signals for charts. |
 
-| query | expected | caveat check |
-|---|---|---|
-| "what's the latest news on Reliance" | `search_news` / `get_company_news`, not sentiment/announcements | — |
-| "what's the market sentiment on TCS right now" | `get_sentiment` in `mode == "aggregate"` | output surfaces `breakdown_on_company` as the number; states score isn't calibrated |
-| "any recent dividend or earnings announcements from M&M" | `get_corporate_announcements` | `caveats` says "NOT the NSE/BSE feed" **and** names the group-company (Tech Mahindra) disambiguation risk; unflagged items tagged lower-confidence |
+Each company gets a complete report before any cross-company step, so its
+conflicts and caveats stay attributed to it. Concurrency defaults to 2 for one
+company and 1 for several (`PLANNER_MAX_CONCURRENCY` overrides).
 
-Verified: in the announcements run the agent listed the 6 flagged M&M items first,
-tagged each Tech Mahindra item `"(lower confidence: ...)"`, and its summary itself
-said *"...Tech Mahindra ... a different Mahindra Group company and not on-company
-for M&M"*. The `get_company_news` payload (9 full articles) is trimmed before the
-synthesis call — the un-trimmed blob confused the smaller fallback models into an
-empty synthesis. Queries are paced ~45 s apart (`GROQ_TEST_GAP_S`) for the ~8k
-tokens/min Groq cap.
-
-## `filings_agent.py` — Filings Agent
-
-Answers questions about what a company disclosed in its **own** annual report,
-grounded in cited pages, by picking one `filings-rag-mcp` tool. Same wiring as
-above (`_base`). The retrieval payload is large (multiple ~1,100-token chunks per
-call), so the trimming lesson from the News Agent is applied **from the start**,
-not retrofitted:
-
-- `_compact` caps the chunk list to 4 and each chunk's text to ~450 chars
-  *before* it reaches the reasoning loop **and** the synthesis call, via the
-  `compact_tool_result` hook. Full chunk text is untouched in `raw_data` for
-  citation/verification.
-- `recursion_limit=10` + a strict "make **exactly one** tool call" system prompt
-  (a 2nd call only if the 1st errored or hit the wrong section). Without this the
-  ReAct loop fired 3–5 `search_filing` calls per question with reworded queries,
-  blowing Groq's ~8k-tokens/min cap on the growing message history.
-
-Caveats it is forced to respect (matching `filings-rag-mcp`'s own README):
-
-| the caveat | what this agent does |
-|---|---|
-| **page citations are the point** | every finding drawn from the filing cites company + fiscal year + page, e.g. `(Reliance Industries, FY2024-25, p.142)`. An un-cited finding is only allowed when it states something was *not* found. |
-| **`may_contain_tabular_data`** — flagged chunk = a statement table PDF-flattened into run-on text | figures from a flagged chunk are hedged (`"approximately"`, `"as read from the flattened table on p.X"`), never restated with false precision; provenance carries a `tabular_warning` naming the exact pages |
-| **`compare_yoy_metrics` is single-filing scope** — the one report's own current + prior-year columns, not a trend across filings | the tool's `limitation` string is carried verbatim into `provenance`; a `caveats` entry keeps *"NOT a cross-filing multi-year comparison — one annual report per company"*; if the query implied wanting a trend, the summary says only this one YoY step is available |
-| **standalone vs consolidated** — `get_financial_statement_section` can return both | `statement_basis` field (`standalone` / `consolidated` / `mixed` / `n/a`) records which the cited figures are on; findings say which, or flag it as unclear from the retrieved text |
-
-Output adds `fiscal_year` and `statement_basis` to the usual
-`{ticker, company, findings, summary, caveats, tools_called, provenance,
-raw_data, reasoning_trace}`.
-
-```python
-from agents.filings_agent import run_sync
-result = run_sync("what are Reliance's key disclosed risks")
-```
-
-### Test
-
-```bash
-python agents/test_filings_agent.py
-```
-
-Three patterns against `RELIANCE` / `TCS` / `M&M` (all ingested), asserting tool
-choice **and** caveat fidelity:
-
-| query | expected tool | caveat check |
-|---|---|---|
-| "what are Reliance's key disclosed risks" | `search_filing` only | every finding cites a page; provenance carries the page list |
-| "what was TCS's revenue and profit for the year, from the income statement" | `get_financial_statement_section` (`income_statement`) | figures hedged; `standalone`/`consolidated` flagged; a caveat says search-based / table-flattened |
-| "how has M&M's EBITDA changed year over year" | `compare_yoy_metrics` | provenance carries `basis` + `limitation`; a caveat states this is **not** a cross-filing multi-year trend |
-
-Verified (per-query, 2026-09-04): Q1 produced 5 page-cited risk findings
-(`p.15`, `p.88`, `p.128`, …) with a tabular caveat naming pages 88/89/128; Q2
-hedged TCS revenue as *"approximately ₹267,021 crore (…FY2025-26, p.167)"* with
-`statement_basis: consolidated`; Q3 correctly reported that M&M's filing does not
-break out "EBITDA" as a line item rather than inventing a figure, while carrying
-the single-filing `limitation`. Queries paced ~90 s apart (`GROQ_TEST_GAP_S`);
-each retrieval is one shared-quota Gemini embedding call.
-
-## `synthesis_agent.py` — Synthesis Agent
-
-The fourth agent, and the odd one out: **no MCP server, no ReAct loop.** It is
-handed the finished output dicts of the other three and reconciles them into the
-report a user actually reads.
-
-```python
-from agents.synthesis_agent import synthesize_sync
-report = synthesize_sync(query, {
-    "market_data":   market_data_agent.run_sync(...),
-    "news_sentiment": news_sentiment_agent.run_sync(...),
-    "filings":        filings_agent.run_sync(...),
-})
-```
-
-The interface — `synthesize(query, specialist_outputs: dict[str, dict])` — takes
-**already-gathered** outputs and nothing else. Deciding *what* to fetch is the
-Planner's job; Synthesis only reconciles and reports.
-
-### How much of `_base.py` applies
-
-`run_agent` is an MCP-plus-ReAct driver — subprocess, tool bridge, `create_react_agent`,
-`extract_trace`. None of that applies here. What's reused directly: `make_model`
-(the rate-limited Groq + fallback chain), `flatten_exc` + `rl.QuotaExceededError`
-classification, and the `with_structured_output(...) + one retry-guard` pattern
-every other agent's `_synthesize` already uses. So the module is `make_model` +
-one structured call + a thin driver of its own — no duplicated LLM/limiter code.
-
-### What it owns
-
-| concern | behaviour |
-|---|---|
-| **conflicting signals** | strong fundamentals vs negative sentiment, a filing risk news is/isn't echoing, a metric two specialists state differently — go into `conflicts_flagged` as `{topic, specialist_a/position_a, specialist_b/position_b, assessment}`, where `assessment` must judge *real contradiction vs different lenses* (trailing vs recent, different fiscal years, sample vs whole). Never averaged into a bland middle. |
-| **fiscal-year vintage** | market_data (yfinance, ~FY2026) and filings (one fixed AR, FY2024-25 / TCS FY2025-26) are different years — the prompt forces this into `overall_caveats` / `conflicts_flagged`, never a silent merge. |
-| **caveat carry-through** | every claim in `sources_by_claim` carries the **strongest upstream hedge** that applied to it (filings table-flattening, filings single-year, news "not the NSE/BSE feed", news "self-reported score", market_data `roe_source` / `as_of`). A hedged finding is never laundered into a confident one. |
-| **attribution** | `sources_by_claim[claim] = {sources: [...], caveat: ...}` — per claim, names the specialist(s) and a specific article/date or filing page where it rests on one. |
-| **partial input** | `_classify` → ok / failed / missing. Missing or errored specialists get an explicit `missing_data` entry and a `"Not available - …"` section even if the model forgets. `synthesize` on an empty set returns an `error`, not a fake report. |
-
-### Output
+`plan(query, on_progress=...)` pushes routing to the caller as soon as it is
+decided and updates `specialist_status` as each specialist moves. The result:
 
 ```python
 {
-  "query": "...",
-  "companies": ["Tata Consultancy Services"],
-  "executive_summary": "... leads with the main tension ...",
-  "sections": {"market_data": "...", "news_sentiment": "...", "filings": "..."},
-  "conflicts_flagged": [{"topic": ..., "specialist_a": ..., "assessment": ...}],
-  "overall_caveats": [...],
-  "missing_data": [...],
-  "sources_by_claim": {"<claim>": {"sources": [...], "caveat": "..."}},
-  "specialists_used": [...], "reasoning_trace": [...], "model": "openai/gpt-oss-120b"
+  "query": "...", "mode": "single" | "multi" | "none",
+  "companies": [...],
+  "routing": {"companies_identified": [{"ticker", "specialists": [{"specialist", "selected", "reason"}], ...}],
+              "rationale": "...", "is_portfolio": False, "weights_note": None, ...},
+  "routing_trace": ["..."],
+  "reports": {"TCS": {...}},
+  "comparison": {...} | None,
+  "portfolio": {...} | None,
+  "signals": {"TCS": {"sentiment": {...}}},
+  "specialist_status": {"TCS": {"market_data": "ok", ...}},
 }
 ```
-On empty/failed input: `{"query", "error", "inputs_received"|"missing_data"}`.
 
-### Test
-
-```bash
-python agents/test_synthesis_agent.py
-```
-
-Runs all three specialists **for real** on TCS (data-complete; Indian IT is the
-case most likely to show a fundamentals-vs-sentiment split), then feeds the real
-outputs in. Case 1 = all three; Case 2 = filings dropped, reusing case 1's fetched
-outputs (partial-failure handling, no extra API calls).
-
-Verified 2026-09-08 (27/27 checks): market_data gave ROE 47.74% / P/E 16.73
-("strong fundamentals"); news_sentiment gave 9-of-10 negative articles over a
-chairman departure + AI-revenue downgrades; the report's `conflicts_flagged`
-entry assessed it *"different lenses… not a factual contradiction but a tension
-between quantitative health and qualitative sentiment"*, `overall_caveats` named
-the FY2026-vs-FY2025-26 vintage gap, and all 5 claims carried their upstream
-hedge (roe_source, "self-reported… not exhaustive", "similarity-based… single
-annual report"). Case 2 marked filings *"Not available"* and did not invent
-filings-sourced claims. Paced `SYNTH_TEST_GAP_S` (45 s) apart.
-
-## `followup_agent.py` — Follow-up Agent
-
-Modeled directly on `synthesis_agent.py`: no MCP server, no ReAct loop, one
-structured-output call. Answers a conversational follow-up on top of a
-**finished** job's report - see `app/README.md`'s "Follow-up conversations"
-for the API layer (`app/followups.py`, `POST/GET /research/{job_id}/followups`).
-
-```python
-from agents.followup_agent import answer_followup
-result = await answer_followup(original_query, report, prior_turns, "and its ROE?")
-```
-
-One call decides two things at once, rather than a classifier call followed by
-a separate rewrite call:
-
-- **`sufficient_data: true`** — the report already contains enough to answer.
-  `answer` is grounded ONLY in the report's `sections` / `sources_by_claim` /
-  `conflicts_flagged` / `overall_caveats` (same fields `_compact_report` pulls
-  out); `caveat` carries the strongest relevant hedge forward, the same rule
-  `synthesis_agent` uses for its own claims.
-- **`sufficient_data: false`** — the question needs a company/metric the
-  report doesn't cover, or genuinely fresh data the report's as-of snapshot
-  can't provide. `missing_reason` says why in plain language, and
-  `standalone_query` is a fully self-contained research question with every
-  reference to earlier turns resolved ("its" → the actual company name) - the
-  point is it can be handed straight to `planner.plan()` with **no memory of
-  this conversation** and still make sense.
-
-`prior_turns` (a compact `[{question, answer}]` list, capped to the most
-recent `_MAX_PRIOR_TURNS`) is what lets a multi-hop chain of follow-ups keep
-resolving references correctly, not just the single most recent question.
-
-Deliberately does **not** have access to the specialists' pre-synthesis
-`raw_data` - only the finished, already-distilled report (that's all
-`research_jobs.report` persists once a job completes; see the Planner's
-`_finalize_node`). A follow-up asking for a number that never made it into
-`key_claims`/`sections` correctly comes back `sufficient_data: false` rather
-than guessing - an honest scope limit, not a bug.
-
-## `planner.py` — the orchestrator
-
-A LangGraph `StateGraph` that turns a raw question into the full pipeline:
-
-```
-START → route → (gather → synthesize → [compare|portfolio]) → finalize → END
-```
+## Usage
 
 ```python
 from agents.planner import plan_sync
-result = plan_sync("give me a complete research view on TCS")
+report = plan_sync("compare TCS and Infosys on fundamentals and risk")
+
+from agents.market_data_agent import run_sync
+result = run_sync("how is TCS valued compared to its fundamentals?")
 ```
 
-| node | what it does |
-|---|---|
-| **route** | one Groq call → which compan(ies) (resolved to NSE tickers), single vs multi, and **which of the 3 specialists each company actually needs** — selective, with a stated reason for every skip. Tickers are confirmed on yfinance (`fast_info`, existence only — the one place the Planner touches yfinance; known large-caps skip the lookup). Filings is skipped up front for any company outside the current filings RAG corpus (`filings_agent.ingested_tickers()` — DB-backed, so an upload/auto-fetch mid-session is picked up without a restart; see `mcp_servers/filings_rag_mcp`). |
-| **gather** | runs the selected specialists as a bounded-concurrency fan-out over the (company × specialist) matrix. Each is the existing agent via its own `run` coroutine — nothing reimplemented. Each call also gets an `on_stage` callback (see `_base.run_agent`) that pushes short live-progress strings ("calling get_quote...", "thinking...", "writing summary...") into `specialist_status`, so a polling client sees per-tool-call granularity instead of one static "running" for the whole call. A specialist that errors becomes `{"error": …}` in that cell, not a crash. |
-| **synthesize** | one `synthesis_agent.synthesize` call per company over whatever cells came back — its proven Case-2 partial handling does the rest. |
-| **compare** | multi-company only, when the router flagged `is_comparison`: a light Groq call over the *finished* per-company reports → `{verdict, dimensions[], caveats[]}`. |
-| **portfolio** | multi-company only, when the router flagged `is_portfolio` instead — mutually exclusive with **compare**. See below. |
-| **finalize** | assembles the output incl. the full routing rationale. |
+## Tests
 
-**Multi-company design:** per-company full pipeline (specialists + synthesis)
-**first**, then one comparison step over the finished reports. Chosen over one
-big synthesis call so the user gets a proper standalone view per company *and*
-the comparison, each company keeps its own conflict-flagging/caveats instead of
-them being blended, and `synthesis_agent` is reused unchanged. The comparison is
-its own small structured call — `synthesize`'s schema is built for one company's
-*raw* specialist output, not already-synthesised reports.
-
-**Concurrency:** `PLANNER_MAX_CONCURRENCY` bounds in-flight specialist agents.
-An explicit value wins; otherwise **2 for a single-company query** (overlaps the
-non-LLM work — MCP spawn, Tavily, embeddings) and **1 for a multi-company one** —
-that fans out to up to 6 specialist agents and 429-cascaded at 2 on the free Groq
-budget (~5k tokens/min shared measured, machine memory-tight). At 1 the fan-out
-serializes through the shared limiter and calls wait rather than fail.
-
-**Routing transparency is a first-class output**, not internal logic - and it's
-pushed live (`plan(on_progress=...)` - see `app/README.md`'s "How live
-progress works") the moment the route node finishes, not just present once the
-whole run is `done`:
-
-```python
-{
-  "query": ..., "mode": "single" | "multi" | "none",
-  "companies": [{"name", "ticker", "resolvable", "resolution_note", "in_filings_corpus"}],
-  "routing": {
-     "specialists_selected": [...],
-     "specialists_skipped":  [{"specialist", "reason"}],   # a real reason per skip
-     "sub_queries": {ticker: {specialist: "..."}},
-     "rationale": "...",                                    # the router LLM's own paragraph
-     "is_portfolio": bool,           # true -> "portfolio" node runs instead of "compare"
-     "weights_note": "..." | None,    # how weight_pct was resolved (given+normalized, or defaulted equal)
-     "companies_identified": [{
-         "name", "ticker", "resolvable", "resolution_note", "in_filings_corpus",
-         "specialists": [{"specialist", "selected": bool, "reason"}],   # PER-COMPANY breakdown -
-         "weight_pct": float | None,                                    # a multi-company query can
-     }],                                                                # route each company differently
-  },
-  "routing_trace": [ "company 'X' -> X.NS: RESOLVABLE ...", "  -> X: skip filings - not one of the ingested corpus", ... ],
-  "graph_path": ["route: ...", "gather: 3/3 ok ...", "synthesize: ...", "finalize"],
-  "reports": {ticker: <full synthesis report>},
-  "comparison": {...} | None,
-  "portfolio": {...} | None,        # mutually exclusive with comparison - see "portfolio node" below
-  "specialist_status": {ticker: {specialist: "pending" | "<live stage text>" | "ok" | "error: ..."}},
-}
-```
-
-`routing_trace` is the same information as a flat, human-readable log - kept
-for the frontend's optional "show full trace" toggle - but `routing` is the
-structured version a UI should actually render against; nothing needs to
-parse trace lines back into structure anymore.
-
-### The `portfolio` node — weighted math in code, reasoning in the LLM
-
-Reached instead of `compare` when the router sets `is_portfolio` - a set of
-holdings the user owns (or is considering) together, asked about as
-diversification/concentration/allocation rather than "which one wins". Two
-things happen, deliberately kept apart:
-
-1. **Weight resolution (`_route_node`, before any specialist runs)** - if
-   every holding got an explicit `weight_pct` from the router (percentages, a
-   stated split, "roughly equal amounts"), they're normalized to sum to 100;
-   if even one is missing, the **whole set** is equal-weighted instead of
-   mixing given and defaulted values, and `routing.weights_note` says so
-   plainly ("not fully specified - treated as equal-weighted"). Never a
-   silent assumption.
-2. **`_portfolio_node` (after synthesis, same graph position as `compare`)**
-   computes weighted-average P/E, ROE, and dividend yield, plus a sector-
-   allocation breakdown, **in plain Python arithmetic** on real numbers - it
-   scans `specialist_outputs[ticker]["market_data"]["raw_data"]` for
-   `sector`/`pe_ratio`/`roe`/`dividend_yield_pct` (flat top-level keys on both
-   `get_fundamentals` and `get_ratios`' responses, so this works regardless of
-   which specific tool the ReAct loop happened to call). Only the qualitative
-   half - `narrative`, `diversification`, `concentration_risks`, `caveats` -
-   is one structured-output LLM call (`_PortfolioAssessment`,
-   `_PORTFOLIO_PROMPT`), given the computed numbers plus each holding's
-   already-synthesized report. The split matters: weighted averages are
-   arithmetic, and letting an LLM "compute" them risks sloppy rounding or
-   outright hallucination on something that has one correct answer.
-
-**Explicitly out of scope, and said so in every `caveats` list**: this is a
-*composition* read (weights + sectors + valuation mix), not a quantitative
-risk model. Real correlation/beta/volatility analysis needs historical
-return time-series data `market_data_mcp` doesn't fetch today - a materially
-bigger data-layer addition, not something `_portfolio_node` pretends to
-approximate. `_PORTFOLIO_PROMPT` explicitly forbids implying the holdings'
-returns have been shown to move together ("same sector" / "similar risk
-drivers", never "correlated" in the statistical sense).
-
-### Test
+Offline unit tests cover request fitting, failure classification, tool-result
+compaction and attribution (`tests/unit/`). Each agent and the planner also
+have live integration tests in `tests/integration/` that check tool choice and
+caveat handling against the real providers:
 
 ```bash
-python agents/test_planner.py routing   # just _route_node ×4 — ~4 Groq calls, fast, reliable
-python agents/test_planner.py 1          # one full end-to-end case (1–4)
-python agents/test_planner.py            # all four end to end (HEAVY)
+pytest tests/integration/test_planner.py --live
 ```
-
-Four query shapes, asserting the routing decision hardest:
-
-| query | expected routing |
-|---|---|
-| "what's Reliance's current stock price" | `market_data` **only**; news + filings skipped with reasons; no `compare` |
-| "give me a complete research view on TCS" | all three specialists; one TCS report |
-| "give me a full picture on State Bank of India" | SBIN resolvable but **filings skipped** — not in the corpus; report built from the 2 available, `missing_data` flags filings |
-| "compare TCS and Infosys on fundamentals, sentiment and risk profile" | `mode: multi`; per-company reports for TCS + INFY; `compare` node runs → `comparison` with ≥2 dimensions |
-
-**Test status (2026-09-08):**
-- **`routing` mode — 25/25, verified fresh.** All four routing decisions correct,
-  including the post-processing override (R3: router LLM proposed all three,
-  planner dropped filings because SBIN isn't in the corpus, reason surfaced in
-  `specialists_skipped`).
-- **Cases 1–3 end to end — verified green** in earlier full runs (real TCS report
-  with conflict-flagging + 4 caveats; SBI report built from 2 specialists with
-  filings flagged in `missing_data`).
-- **Case 4 end to end — routing verified every run; full execution is
-  free-Groq-tier-limited.** The four-case run is ~50–65 LLM calls and the shared
-  ~7.5k-tokens/min Groq budget can't sustain it in one sitting — cases fail on
-  `429` at random points. Every time, the planner **degraded correctly** (partial
-  `specialist_status`, `missing_data` populated, no crash). Run cases individually
-  in a quiet quota window for the full-execution proof.
-
-Concurrency for the multi-company case auto-drops to 1 (`_concurrency(multi=True)`);
-`_base`'s acquire timeout is 240 s so calls wait through a burst. `synthesis_agent`
-retries a degenerate structured-output generation (`tool_use_failed`).
-

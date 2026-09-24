@@ -1,85 +1,50 @@
-# shared/
+# shared
 
-Cross-cutting infrastructure used by more than one ArthaNeeti component. Not tied
-to any single MCP server or agent.
+Infrastructure used by more than one component.
 
-Currently one module:
+## `llm_rate_limiter.py`
 
-## `llm_rate_limiter.py` — one quota per provider, many processes
+Each LLM provider is used with a single API key, so the API process, the three
+MCP server subprocesses and the ingestion script all draw on one account quota
+per provider. The limiter gives them a shared view of that quota.
 
-### The problem
+### How it works
 
-ArthaNeeti's components call three hosted LLM surfaces with **one API key each**:
-Gemini embeddings (`filings_rag_mcp`), Gemini generation (`research_mcp`
-sentiment), and Groq generation (the LangGraph agents' reasoning). Each is one
-account-wide quota, but each process was policing only its own usage with an
-in-memory limiter. Run the filings ingestion and a couple of agents at once and
-they collectively sail past the limits — 429s, backoff storms, and (worst) a
-daily cap burned before the work finishes. It nearly happened with Gemini's
-20/day generate cap.
-
-### The design: a local SQLite ledger
-
-Every request reserves a row `(bucket, timestamp, tokens, requests)` in a small
-SQLite database, where `bucket` is `<provider-family>:<model>`. `acquire()` opens
-the DB in an `IMMEDIATE` transaction — a real **cross-process write lock** —
-evaluates the sliding per-minute and per-day windows against the ledger, and
-either records the reservation and returns, or drops the lock and sleeps until
-the window frees.
+Every request reserves a row `(bucket, timestamp, tokens, requests)` in a local
+SQLite database in WAL mode. `acquire()` opens an `IMMEDIATE` transaction, which
+serializes the check across processes, evaluates the sliding per-minute window
+and the per-day window, and either records the reservation or waits until the
+window has room.
 
 ```
-process A ─┐
-process B ─┼─►  .llm_rate_limiter.db  ◄─── one IMMEDIATE txn at a time
-process C ─┘        (bucket, ts, tokens, requests)
-                    sliding 60s window + since-midnight-PT day window
+API process ─────┐
+MCP servers ─────┼──►  .llm_rate_limiter.db   (one IMMEDIATE transaction at a time)
+ingestion job ───┘
 ```
 
-### Why SQLite and not something else
+SQLite keeps each check local and sub-millisecond, persists daily counts across
+restarts and needs no extra dependency. A remote database would add a network
+round trip to every LLM call. The file must be on a local disk.
 
-| option | why not (for a local, single-machine, solo project) |
-|---|---|
-| **in-memory** (status quo) | can't see other processes — the entire problem |
-| **Postgres** (we hold a connection) | it's a **remote** Supabase instance: ~50–150 ms per rate check, and it drags a DB dependency into `research_mcp`, which otherwise needs none. A rate check should be local and ~free. |
-| **a "gateway" daemon** all callers proxy through | genuinely correct, and how you'd scale it. But it adds a long-running process to supervise, startup-ordering concerns, and an IPC layer — too much machinery for one laptop. Revisit if this ever runs distributed. |
-| **JSON file + advisory locks** (`fcntl`/`msvcrt`/`filelock`) | SQLite already does atomic cross-process read-modify-write, portably, with WAL. Hand-rolling it is more code and more bugs. |
+### Default limits
 
-SQLite in **WAL mode on a local disk** gives true multi-process coordination,
-sub-millisecond checks, survives restarts (the daily counter persists), and adds
-**zero dependencies** (`sqlite3` is stdlib). The one requirement: the DB file
-must be on a local filesystem, not a network share. Fine for a dev machine.
+| Bucket | Per minute | Per day | Used by |
+| --- | --- | --- | --- |
+| `embed` | 100 requests, 30k tokens | 1,000 requests | Annual-report indexing and retrieval |
+| `generate:<model>` | 6 requests | 20 requests | News sentiment (Gemini) |
+| `groq` | 27 requests, 5k tokens | 950 requests, 350k tokens | Agent reasoning |
 
-The concurrent test (`test_llm_rate_limiter.py`) spins up 3 real subprocesses
-hammering the limiter and asserts no sliding window is ever exceeded and the
-daily cap stops **exactly** at the limit across processes — proving it
-coordinates, not just self-limits.
+- Gemini models each have their own window (`generate:<model>`), so falling
+  back to another model adds headroom.
+- Groq limits by account, so one `groq` bucket covers every model in the chain.
+  Its sustained rate is set below the advertised 8k tokens per minute because
+  higher rates still draw 429s. The daily token wall is an estimate of an
+  undocumented limit.
+- Each text in an embedding batch counts as one request: pass `count=len(batch)`.
 
-### Limits (observed on free tiers, 2026-09 — re-verify, these drift)
-
-| family | per minute | per day | who uses it |
-|---|---|---|---|
-| `embed` (`gemini-embedding-001`) | 100 req / 30k tokens | **1,000 req** ← hard wall | filings-rag ingestion + queries |
-| `generate` (Gemini flash) | ~5 req | **~20 req** ← hard wall | research-mcp sentiment |
-| `groq` (`openai/gpt-oss-120b`, …) | ~27 req / **~7.5k tokens** ← binds | ~950 req **+ ~350k tokens/day** ← estimated wall | the agents' reasoning |
-
-- **Each text in an `embed_content` batch is one request** against both caps
-  (a 90-text batch spends 90). Pass `count=90`.
-- Buckets: Gemini is per **model** (`request_type="generate:<model>"`) so a
-  fallback chain gets a window per model. **Groq is one shared `"groq"` bucket**
-  across the whole model chain — its free tier rate-limits account-wide, so
-  per-model windows just let calls through that Groq then 429s.
-- `groq`'s per-minute binding limit is tokens, so the limiter paces by token
-  spend. It **also** enforces a daily-token wall (`tpd`): Groq has one that isn't
-  in its headers but 429-cascades every model after a day of heavy use while
-  req/day is barely touched. The 350k figure is an estimate (the ledger records
-  *estimated* tokens); it's tuned to trip the limiter's own clean
-  `QuotaExceededError` before Groq starts cascading. A single-company query is
-  ~60k tokens, multi-company ~100k, so it still allows several runs/day.
-
-Override any limit with env vars: `LLM_RL_<FAMILY>_RPM` / `_TPM` / `_RPD` / `_TPD`
-(family = the part before `:`). On a **paid key**, `LLM_RL_GROQ_TPD=0` removes the
-daily-token wall and `LLM_RL_EMBED_RPD=100000` the embed wall.
-
-DB location: `<repo>/.llm_rate_limiter.db` (gitignored), override with
+Override any limit with `LLM_RL_<FAMILY>_RPM`, `_TPM`, `_RPD` or `_TPD` (family
+is the part before `:`). On paid keys, `LLM_RL_GROQ_TPD=0` removes the daily
+token wall. The ledger lives at `<repo>/.llm_rate_limiter.db`, or at
 `LLM_RATE_LIMITER_DB`.
 
 ### Interface
@@ -87,49 +52,26 @@ DB location: `<repo>/.llm_rate_limiter.db` (gitignored), override with
 ```python
 from shared import llm_rate_limiter as rl
 
-# retry-loop style (each attempt accounted for)
 rid = rl.acquire(estimated_tokens=1200, request_type="embed", count=90)  # blocks
 try:
-    resp = client.models.embed_content(...)
-except RateLimited:            # a 429 didn't spend quota
-    rl.refund(rid, "embed")
-    ... backoff, then re-acquire ...
+    response = client.models.embed_content(...)
+except RateLimitError:
+    rl.refund(rid, "embed")        # a rejected call spent no quota
 
-# single-attempt style
 with rl.reserve(est_tokens, "generate:gemini-3-flash-preview"):
-    resp = client.models.generate_content(...)   # auto-refunds if the block raises
+    response = client.models.generate_content(...)   # refunded if this raises
 
-rl.snapshot()   # {bucket: {last_min_requests, last_min_tokens, today_requests, today_tokens,
-                #           day_remaining, day_tokens_remaining, limits}}
-rl.reset()      # wipe the ledger (tests, or "I know quota actually reset")
+rl.snapshot()   # usage and remaining allowance per bucket (served at GET /status)
 ```
 
-`acquire()` raises `QuotaExceededError` when the **daily** cap for the bucket is
-already spent (waiting hours is not "blocking appropriately") or when `timeout`
-seconds elapse waiting on the **per-minute** window. Callers turn that into their
-own domain error: `research_mcp` → `{"error": ...}`, `filings_rag_mcp` →
-`EmbeddingQuotaError` (so ingestion checkpoints and stops).
+`acquire()` raises `QuotaExceededError` when a bucket's daily allowance is spent
+or the wait for the per-minute window exceeds `timeout`. Callers translate it:
+research-mcp returns `{"error": ...}`, indexing raises `EmbeddingQuotaError` and
+stops at a checkpoint, and agents report the source as unavailable.
 
-### What was migrated
+### Tests
 
-- `filings_rag_mcp/embeddings.py` — deleted its local `_TokenRateLimiter`; the
-  token/request throttle is now `rl.acquire(..., "embed", count=len(batch))`.
-- `research_mcp/research.py` — `_gemini_json` now calls
-  `rl.acquire(..., f"generate:{model}")` before **every** HTTP attempt (it had
-  only *reactive* 429 handling before; now it's proactive too), refunding on 429.
-- `filings_rag_mcp/config.py` — dropped `EMBED_TPM` / `EMBED_RPM`; those live in
-  the limiter now (`LLM_RL_EMBED_*`). `EMBED_BATCH_TOKENS` stays (it's a
-  batching concern, not a rate concern).
-
-No local rate-limiting logic remains in either server — there is one system now.
-
-### Testing
-
-```bash
-python shared/test_llm_rate_limiter.py
-```
-
-Spawns real subprocesses against a throwaway ledger with tiny fake limits. No
-Gemini API calls, no quota cost. ~15 s. Checks: per-minute coordination across 3
-processes, the daily cap enforced across 2 processes, and single-process
-`acquire`/`refund`/`snapshot`/`reserve` behaviour.
+`tests/unit/test_llm_rate_limiter.py` runs real worker processes against a
+temporary ledger with small limits and a shortened window. It checks that the
+per-minute window holds across processes and that the daily cap stops at the
+exact limit. No provider calls are made.

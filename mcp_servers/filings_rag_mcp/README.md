@@ -1,336 +1,118 @@
 # filings-rag-mcp
 
-A retrieval-augmented pipeline over the **actual annual-report PDFs** of ~10 large
-Indian companies (in `data/filings/`, one filing each — FY2024‑25, TCS is
-FY2025‑26). Ingestion parses, chunks, embeds and stores; the MCP server answers
-grounded questions with cited pages. Tool layer for the **Filings Agent**.
+Retrieval over the text of companies' annual reports, with page citations. An
+indexing pipeline parses, chunks and embeds each PDF into Postgres with
+pgvector; the MCP server (stdio) answers the annual-report agent's queries.
 
-Same conventions as `market_data_mcp` / `research_mcp`: framework-agnostic core
-(`retrieval.py`), thin MCP wrapper (`server.py`), dict returns with
-`{"error": "..."}` on failure (never raises), `as_of` on success, standalone test.
+| Setting | Use |
+| --- | --- |
+| `DATABASE_URL` | Postgres with the `vector` extension |
+| `GEMINI_API_KEY` | Embeddings (`gemini-embedding-001`) |
 
-## Infrastructure
+Tables (`filing_chunks`, `filing_ingestions`) and indexes are created
+automatically.
 
-| Piece | What |
-|---|---|
-| `DATABASE_URL` | Supabase Postgres 17 + **pgvector 0.8.2** |
-| `GEMINI_API_KEY` | Gemini embedding API (`gemini-embedding-001`) |
+## Corpus
 
-Both read from the project `.env` (real env vars win). Tables (`filing_chunks`,
-`filing_ingestions`) and indexes are created automatically by `ingest.py` /
-`init_schema()`.
+Ten annual reports are indexed: Reliance, TCS, M&M, Bharti Airtel, HDFC Bank,
+Hindustan Unilever, ICICI Bank, Infosys, L&T and Sun Pharma. That is 3,291
+pages in 3,980 chunks; the reports are fiscal 2024-25 except TCS (fiscal
+2025-26). More companies can be added through the web app or the API (upload or
+web fetch).
 
-## Embeddings
+## Tools
 
-- **Model**: `gemini-embedding-001` — the current stable model. `text-embedding-004`
-  is retired; `gemini-embedding-2` mis-batches (returned 1 vector for 3 inputs in
-  testing). Override with `FILINGS_EMBED_MODEL`.
-- **Dimensions**: **768** (`output_dimensionality=768`, override `FILINGS_EMBED_DIM`).
-  The full model is 3072-dim but pgvector's HNSW index tops out at 2000 dims;
-  Gemini's Matryoshka training keeps 768 strong. Reduced-dim vectors are **not**
-  pre-normalised by Gemini, so `embeddings.py` L2-normalises every vector before
-  storage — required for cosine similarity to behave.
-- **Task types**: `RETRIEVAL_DOCUMENT` for chunks, `RETRIEVAL_QUERY` for queries.
+| Tool | Arguments | Returns |
+| --- | --- | --- |
+| `search_filing` | `query`, `ticker`, `top_k` | Most similar chunks: page, similarity, fiscal year, table flag, text |
+| `get_financial_statement_section` | `ticker`, `statement_type` (`balance_sheet`, `income_statement`, `cash_flow`, `equity_changes`) | Chunks from that statement, with `pages_returned` |
+| `compare_yoy_metrics` | `ticker`, `metric` | The report's own year-on-year disclosures for a metric, with `basis` and `limitation` |
 
-### Quota — free tier has BOTH a per-minute and a per-DAY wall, shared with research-mcp
+Failures return `{"error": ...}`; successes carry `as_of`.
 
-Observed limits for `gemini-embedding-001` on the free tier (Sept 2026, will drift):
+- **Statements.** Found by meaning plus statement headers ("consolidated
+  statement of profit and loss"). Header matches rank first; pages 1 to 8
+  are excluded because the table of contents repeats every header. Page
+  positions vary too much between companies for a fixed page range.
+  Standalone and consolidated versions can both appear.
+- **Year-on-year.** Each company has one report, so this tool returns the
+  report's own year-on-year commentary and prior-year columns, not a
+  multi-year trend. The response says so in `limitation`.
 
-| limit | value | notes |
-|---|---|---|
-| tokens / minute | ~30,000 | binds first at ~1,000 tokens/chunk (~25–30 chunks/min) |
-| requests / minute | ~100 | each text in a batch = 1 request |
-| **requests / DAY** | **1,000** | `EmbedContentRequestsPerDayPerUserPerProjectPerModel-FreeTier` — the hard wall |
-
-**The 1,000/day cap is the real constraint.** Each chunk = 1 request, so the free
-tier embeds **~1,000 chunks/day** → the full ~4,200-chunk corpus takes
-**~4–5 days** of resumed runs (or a paid key, or coarser chunks). `ingest.py`
-stops cleanly on the daily wall and prints a resume hint; re-run it after the
-quota resets (~midnight US-Pacific).
-
-Rate limiting is delegated to **`shared/llm_rate_limiter.py`** — a
-**cross-process** limiter (SQLite ledger) so ingestion, the live server, and the
-LangGraph agents share one view of the account-wide Gemini quota, not three blind
-local ones. `embeddings.py` calls `rl.acquire(tokens, "embed", count=len(batch))`
-before each `embed_content` call and refunds on 429; `EMBED_BATCH_TOKENS` (default
-22,000) still controls how many texts go in one HTTP call. Tune limits via
-`LLM_RL_EMBED_RPM` / `_TPM` / `_RPD` — see that module's README.
-
-This is the **same Gemini quota research-mcp's `get_sentiment` uses**, which is
-exactly why the limiter is shared — a big ingestion and the sentiment tool now
-coordinate through one ledger instead of racing.
-
-## Ingestion (`ingest.py`)
-
-Run once / on demand — **not** part of the live MCP tools.
+## Indexing
 
 ```bash
-python -m mcp_servers.filings_rag_mcp.ingest            # all 10, skip done
+python -m mcp_servers.filings_rag_mcp.ingest                  # PDFs in data/filings/, skipping finished ones
 python -m mcp_servers.filings_rag_mcp.ingest --only RELIANCE TCS
-python -m mcp_servers.filings_rag_mcp.ingest --force    # re-ingest everything
-python -m mcp_servers.filings_rag_mcp.ingest --status   # print progress, exit
+python -m mcp_servers.filings_rag_mcp.ingest --force          # re-index everything
+python -m mcp_servers.filings_rag_mcp.ingest --status
 ```
 
-### Ad-hoc filings beyond the seeded 10 (`ingest_file()`, `fetch.py`)
+Bulk files are named `TICKER_AR_YYYY-YY.pdf` (`MM_AR_...` maps to `M&M`).
+`ingest_file()` indexes one PDF with an explicit ticker, company and fiscal
+year; the API's upload and fetch jobs use it.
 
-The CLI above is the *seeded-corpus* path (10 fixed PDFs in `data/filings/`,
-ticker/company/fiscal_year derived from the `TICKER_AR_YYYY-YY.pdf` filename
-convention). `ingest_file()` is the same chunk → embed → store pipeline
-generalized for one ad-hoc PDF with explicit `ticker`/`company`/`fiscal_year`
-(an upload's filename is arbitrary) - this is what `app/filings.py` calls for
-both ways a user can add a company outside the seeded 10:
+### Chunking
 
-- **`POST /filings/upload`** - a PDF the user already has.
-- **`POST /filings/fetch`** - best-effort auto-fetch (`fetch.py`): Tavily-search
-  for the company's annual report, keep only direct `.pdf` search hits, rank
-  them (an "annual report"/"report and accounts" title outranks a quarterly
-  result; a title/URL matching the requested fiscal year gets a bonus), then
-  **download and verify** the top few candidates before accepting one - the
-  downloaded PDF's own leading pages must actually name the company. That
-  verification step exists because ranking alone isn't enough: a same-family
-  entity with an overlapping name (e.g. a demerged "ITC Hotels Limited" report
-  surfacing for a search for "ITC") would otherwise pass as a plausible-looking
-  false positive. It checks for the company's core name immediately followed
-  by its own corporate suffix as a contiguous phrase ("itc limited"), which a
-  subsidiary's report - text like "itc hotels limited" - does not contain.
-  Deliberately does **not** scrape HTML pages for an embedded PDF link - only
-  a search result that is itself a `.pdf` URL counts as a candidate; a miss
-  ends in `FetchError` (surfaced as the job's `error`), pointing at the upload
-  path as the reliable fallback. A genuine "couldn't find/verify one" is an
-  expected outcome for an obscure or small-cap company, not a bug.
+- Text is extracted page by page with pypdf, so every chunk cites one page.
+- A page up to 1,100 tokens is one chunk. Longer pages split into windows with
+  150 tokens of overlap on paragraph and line boundaries. Pages under 24 tokens
+  are skipped.
+- Section detection was not used because report layouts differ too much
+  between companies.
 
-### Chunking strategy
+### Tables
 
-- **Parse page by page** with `pypdf`. Every chunk records `page_number` +
-  `filename` so retrieval cites a precise page.
-- **One chunk per page** when the page is ≤ `CHUNK_TARGET_TOKENS` (default 1,100).
-  Longer pages are split into **overlapping windows** (`CHUNK_OVERLAP_TOKENS`
-  default 150) on paragraph → line boundaries, so a chunk never straddles two
-  pages and mid-page context isn't lost at a boundary. Near-empty pages
-  (< 24 tokens) are skipped.
-- Why not fixed-character splitting: it cuts sentences and table rows mid-token
-  and loses the page anchor. Why not section-based: annual-report section
-  structure is not reliably machine-detectable across 10 different companies'
-  layouts, and page-anchored chunks are what makes a citation trustworthy.
+PDF extraction flattens tables into runs of numbers. Each chunk gets a
+`numeric_density` and a `may_contain_tabular_data` flag: set at density 0.18 or
+above, or on four consecutive numeric tokens. About 41% of chunks are flagged.
+The flag warns that labels may be scrambled even where figures are intact; the
+agent hedges figures from flagged chunks. Extraction also renders `₹`
+inconsistently (as `C` or `J`).
 
-### Table handling — a known, unsolved limitation (stated honestly)
+### Embeddings
 
-Raw PDF text extraction **mangles tables**: columns collapse into run-on text, so
-a balance sheet reads as `Statutory Reserve As per last Balance Sheet 445 445
-Transferred from Retained Earnings 158 - 603 445 ...`. Perfect table parsing is a
-hard, separate problem and **out of scope**. Instead each chunk is scored:
+- 768 dimensions: pgvector's HNSW index supports up to 2,000, and the model
+  holds up well when truncated.
+- Vectors are L2-normalized in code, because Gemini only normalizes
+  full-length output.
+- Chunks are embedded as `RETRIEVAL_DOCUMENT` and queries as
+  `RETRIEVAL_QUERY`.
 
-- `numeric_density` — fraction of whitespace tokens that look like numbers;
-- `may_contain_tabular_data` — `true` when `numeric_density ≥ 0.18` **or** the
-  text has a run of ≥ 4 number-ish tokens in a row (a collapsed row).
+### Quota and resuming
 
-This is a **flag, not a fix.** A `true` chunk is probably a flattened table — the
-numbers are likely intact but their row/column labels may be scrambled; cite the
-page and have a human/agent verify. A `false` chunk is probably prose. Expect
-false positives (a paragraph full of figures) and false negatives (a sparse
-table). ~40–50% of chunks flag `true` in practice — financial reports are
-number-dense.
+The free tier allows 1,000 embedding requests a day, one per chunk, plus
+per-minute limits. The same account quota also serves the news sentiment calls,
+so all calls go through the shared rate limiter.
 
-Also: PDF font glyphs for `₹` extract inconsistently as `C` or `J`
-(`₹ 25,211 crore` → `C 25,211 crore`), and apostrophes as `?` (`Employees?
-Stock Option Scheme`). Retrieval is semantic enough to tolerate this; downstream
-display should be aware.
+- Inserts commit in groups of 60 chunks.
+- A finished file is skipped on later runs.
+- A partly indexed file is cleared and redone.
+- When the daily quota runs out, the run stops cleanly; running it again after
+  the reset (about midnight US Pacific) continues. `scripts/daily_ingest.ps1`
+  automates this.
 
-### Entity boundary
+### Finding reports on the web (`fetch.py`)
 
-Simple, unlike research-mcp's group-company problem: each PDF **is** one company's
-own filing. Ticker is derived from the filename prefix
-(`RELIANCE_AR_2024-25.pdf` → `RELIANCE`), with one override (`MM` → `M&M` to match
-the project's NSE-style ticker). The ticker→name map mirrors `research_mcp`'s
-convention (kept local so the servers stay independent). Every chunk is tagged
-with its ticker; retrieval filters on it — no cross-company bleed is possible.
+Used by `POST /filings/fetch`:
+1. Search Tavily and keep only results that are direct PDF links.
+2. Rank them: "annual report" titles above quarterly results, with a bonus
+   for the requested fiscal year.
+3. Download the top candidates and accept the first whose opening pages
+   contain the company's name followed by its corporate suffix ("ITC
+   Limited"). This rejects a subsidiary's report ("ITC Hotels Limited").
 
-### Resumability
+HTML pages are not scraped. When nothing qualifies, the job fails with a
+suggestion to upload the report instead.
 
-- A filename in `filing_ingestions` = fully done → skipped (unless `--force`).
-- Chunks present but no `filing_ingestions` row = a run died mid-file → those
-  chunks are deleted and the file redone from scratch.
-- Inserts commit per group (default 60 chunks), so a crash costs at most one
-  group, never the whole run. On an `EmbeddingQuotaError` the run stops and prints
-  a resume hint; just run the command again.
-
-### Automated daily resume (Windows Task Scheduler)
-
-> **Now disabled** — the corpus finished ingesting 2026‑09‑07. The task
-> (`ArthaNeeti-DailyFilingsIngest`) is `Disable-ScheduledTask`'d, not removed;
-> `Enable-ScheduledTask` it if filings are ever added. Kept below as a record of
-> how the free-tier ingestion was run.
-
-Because the free tier is a ~4–5 day job, a scheduled task ran the resume once a
-day so the filings finished without anyone remembering to.
-
-| | |
-|---|---|
-| **Wrapper** | `scripts/daily_ingest.ps1` — `cd`s to the repo, runs `venv\Scripts\python.exe -m mcp_servers.filings_rag_mcp.ingest`, appends stdout+stderr to `logs/ingest_YYYY-MM-DD.log`, and translates the exit code (0 = corpus complete, 2 = hit the daily quota wall = normal, else = real error). `logs/` is gitignored. |
-| **Task name** | `ArthaNeeti-DailyFilingsIngest` (root task folder `\`) |
-| **Trigger** | Daily at **12:45 IST**. The Gemini embedding daily quota resets at ~00:00 US-Pacific ≈ 12:30 IST, so the run lands just after the reset and gets a fresh full day's budget instead of running mid-quota. `-StartWhenAvailable` so a missed run (laptop asleep) fires when the machine wakes. |
-| **Action** | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:\SELF_PROJECTS\artha-neeti\scripts\daily_ingest.ps1"` |
-| **Runs as** | `Antareep`, "interactive only" (runs only while logged on — no stored password). |
-| **Time limit** | 2 hours (a day's budget embeds in well under that). |
-
-Inspect / adjust / disable:
-
-```powershell
-schtasks /query /tn "ArthaNeeti-DailyFilingsIngest" /v /fo LIST     # status + next run
-Get-ScheduledTaskInfo -TaskName "ArthaNeeti-DailyFilingsIngest"     # last run result
-
-# once `ingest.py --status` shows all 10 filings, turn it off:
-Disable-ScheduledTask -TaskName "ArthaNeeti-DailyFilingsIngest"
-# or remove entirely:
-Unregister-ScheduledTask -TaskName "ArthaNeeti-DailyFilingsIngest" -Confirm:$false
-```
-
-Re-register (from the repo root) with the block in `scripts/daily_ingest.ps1`'s
-header, or:
-
-```powershell
-$action  = New-ScheduledTaskAction -Execute "powershell.exe" -Argument '-NoProfile -ExecutionPolicy Bypass -File "D:\SELF_PROJECTS\artha-neeti\scripts\daily_ingest.ps1"'
-$trigger = New-ScheduledTaskTrigger -Daily -At 12:45PM
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2)
-Register-ScheduledTask -TaskName "ArthaNeeti-DailyFilingsIngest" -Action $action -Trigger $trigger -Settings $settings -Force
-```
-
-> DST note: US-Pacific goes to UTC-8 in early Nov 2026, shifting the quota reset
-> to ~13:30 IST. Ingestion should be long finished by then; if not, bump the
-> trigger to 13:45.
-
-### Ingestion cost / scale
-
-10 filings, **3,291 PDF pages total** → roughly **~4,200 chunks** (≈ 1.3
-chunks/page; ~3.3M input tokens; each chunk = one 768-dim vector = one embedding
-API request). Two limits stack:
-
-- **per-minute**: the ~27k tok/min throttle → ~25 chunks/min → a 300-chunk filing
-  takes ~12–15 min of wall time (mostly waiting on the token budget).
-- **per-day**: 1,000 embedding requests → **~1,000 chunks/day**, so the full
-  corpus is a **~4–5 day** job of resumed runs on the free tier.
-
-Test companies (`RELIANCE`, `TCS`, `M&M`) are queued first so a partial run still
-demos. Live numbers: `ingest.py --status`.
-
-## MCP tools (`server.py`)
-
-Run: `python mcp_servers/filings_rag_mcp/server.py` (stdio). Requires ingestion to
-have run first.
-
-### `search_filing(query, ticker, top_k=5)`
-
-Embed the query, cosine-similarity search over that ticker's chunks. Returns
-`{page_number, similarity (0–1), may_contain_tabular_data, numeric_density,
-fiscal_year, text}` per hit, best first. The general-purpose tool for grounded
-questions about a company's disclosures.
-
-### `get_financial_statement_section(ticker, statement_type)`
-
-`statement_type` ∈ `balance_sheet`, `income_statement`, `cash_flow`,
-`equity_changes` (aliases like `"profit and loss"`, `"p&l"` accepted).
-
-Approach: a hand-written semantic query per statement type **plus a keyword
-boost** — chunks whose text contains an actual statement header
-(`"consolidated statement of profit and loss"`, `"standalone balance sheet"`,
-`"statement of cash flows"`, …) are pulled in via `ILIKE` and ranked ahead of the
-purely-semantic hits, de-duplicated on `(page, chunk_index)`. Keyword matches are
-restricted to `page_number > 8` — the table of contents lists every statement
-header and would otherwise always match.
-
-Tuning that mattered (found while testing): the bare phrase
-`"statement of profit and loss"` matches every *note* that references the P&L, so
-the keyword list uses the fuller `"consolidated/standalone statement of profit and
-loss"` headers instead. With that, RELIANCE/TCS land the real statement page in
-the top 1–3 hits for balance sheet, cash flow, and income statement.
-
-**No hard page-range assumption.** Annual-report structure is only *roughly*
-predictable (statements sit in the back third; standalone before consolidated),
-and it varies enough across companies that a fixed page window would miss as often
-as it helps. So the tool finds the statement by meaning + header text and
-**reports the pages it landed on** (`pages_returned`) for the caller to
-sanity-check.
-
-Limits: it returns chunks, not a parsed statement — numbers may be
-column-flattened; standalone and consolidated versions both match (by design — the
-caller sees both); the auditor's report and section dividers, which sit right next
-to the statements and name them, sometimes appear in the results.
-
-### `compare_yoy_metrics(ticker, metric)` — scoped honestly to ONE filing
-
-**We chose to scope this to the filing's own year-over-year disclosure, not fake a
-multi-year comparison.** ArthaNeeti holds exactly one annual report per company,
-so a real cross-filing trend is impossible here. What annual reports *do* contain
-is their own YoY commentary — MD&A / Board's Report lines like *"Revenue grew 7.2%
-Y‑o‑Y"* and financial statements with current + prior-year columns. This tool
-retrieves *that*: a semantic query for the metric's year-on-year change plus a
-keyword boost for `"Y-o-Y"`, `"year-on-year"`, `"compared to the previous year"`,
-etc.
-
-The response spells out the scope in two fields:
-
-- `basis`: *"single filing's own reported year-over-year figures (FY… vs the prior
-  year, as stated in the document)"*
-- `limitation`: *"NOT a cross-filing multi-year comparison — ArthaNeeti has one
-  annual report per company."*
-
-To do true multi-year trend analysis you'd ingest prior years' reports — a
-deliberate v2, out of scope now.
-
-## Testing
-
-`test_retrieval.py` — standalone (not pytest). Prints the **actual retrieved chunk
-text + page numbers** so retrieval quality is judged by eye, then a few
-structural assertions.
+## Running
 
 ```bash
-python mcp_servers/filings_rag_mcp/test_retrieval.py
+python -m mcp_servers.filings_rag_mcp.server
 ```
 
-Needs ingestion done for at least `RELIANCE`, `TCS`, `M&M`. Makes ~1 Gemini
-embedding call per query (small: query text only).
+## Tests
 
-## Ingestion run — COMPLETE
-
-Cold run started 2026‑09‑03; **all 10 filings ingested by 2026‑09‑07** over five
-daily resumes on the free tier (RELIANCE + TCS day 1, then ~2 filings/day until
-the 1,000 embeddings/day cap, `ingest.py` checkpointing and resuming each time).
-The `ArthaNeeti-DailyFilingsIngest` scheduled task did the resuming and is now
-**disabled** (`Disable-ScheduledTask`; re-enable if filings are ever added).
-
-| ticker | chunks | tabular chunks | pages | status |
-|---|---:|---:|---:|---|
-| RELIANCE | 310 | 167 (54%) | 1–146 | ✅ |
-| TCS | 381 | 224 (59%) | 1–360 | ✅ |
-| M&M | 470 | 192 (41%) | 1–249 | ✅ |
-| BHARTIARTL | 483 | 328 (68%) | 1–288 | ✅ |
-| HDFCBANK | 598 | 153 (26%) | 2–589 | ✅ |
-| HINDUNILVR | 484 | 117 (24%) | 2–468 | ✅ |
-| ICICIBANK | 351 | 124 (35%) | 2–341 | ✅ |
-| INFY | 402 | 187 (47%) | 2–368 | ✅ |
-| LT | 152 | 16 (11%) | 2–153 | ✅ |
-| SUNPHARMA | 349 | 138 (40%) | 1–325 | ✅ |
-| **total** | **3,980** | **1,646 (41%)** | | **10/10** |
-
-`ingest.py --status` for live numbers. (LT's PDF in `data/filings/` is the
-153‑page version — fewer chunks than the others by document length, not a partial
-ingest; `filing_ingestions` has all 10 rows.)
-
-Per-minute throughput observed: ~60 chunks per ~2‑minute commit group
-(≈ 25k tok/min). A ~350–600‑chunk filing took ~8–15 min of wall time.
-
-## File layout
-
-```
-mcp_servers/filings_rag_mcp/
-├── __init__.py
-├── config.py         # env loading, ticker maps, tunables
-├── db.py             # psycopg2 + pgvector: schema, insert, similarity search
-├── chunking.py       # pypdf parse -> page-anchored overlapping chunks + table flag
-├── embeddings.py     # Gemini embedding, L2-normalise; rate limiting -> shared/
-├── ingest.py         # the pipeline CLI (resumable)
-├── retrieval.py      # framework-agnostic logic behind the 3 tools
-├── server.py         # MCP server: 3 tools + stdio entrypoint
-├── test_retrieval.py # standalone retrieval-quality test
-└── README.md
-```
+`tests/integration/test_filings_retrieval.py` (`--live`) prints the retrieved
+text and pages for each tool against Reliance, TCS and M&M and checks their
+structure. Each query makes one embedding call.
