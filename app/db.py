@@ -15,7 +15,7 @@ import json
 import os
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Iterator
 
 import psycopg2
@@ -145,12 +145,41 @@ def create_job(query: str, *, conversation_id: str | None = None, parent_job_id:
 
 
 def count_jobs_since(cutoff: datetime) -> int:
-    """How many research_jobs rows were created at or after `cutoff` - backs
-    the deployment-only daily job cap in app/main.py (protects the shared
-    free-tier LLM quota from a public URL getting hammered)."""
+    """Research jobs created at or after `cutoff` (the daily job cap)."""
     with connect() as conn, conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM research_jobs WHERE created_at >= %s", (cutoff,))
         return cur.fetchone()[0]
+
+
+INTERRUPTED_MESSAGE = "This run was interrupted by a server restart. Please start it again."
+
+# A running research job refreshes updated_at every HEARTBEAT_SECONDS; one that
+# has been silent for STALE_AFTER lost its process.
+HEARTBEAT_SECONDS = 60
+STALE_AFTER = timedelta(minutes=3)
+
+
+def touch_job(job_id: str) -> None:
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE research_jobs SET updated_at = now() WHERE job_id = %s", (job_id,))
+        conn.commit()
+
+
+def fail_stale_jobs(job_id: str | None = None) -> int:
+    """Mark queued/running research jobs with no recent heartbeat as
+    interrupted: all of them, or only `job_id`. Returns the number closed."""
+    sql = (
+        "UPDATE research_jobs SET status = 'error', error = %s, updated_at = now() "
+        "WHERE status IN ('queued', 'running') AND updated_at < now() - %s"
+    )
+    params: list[Any] = [INTERRUPTED_MESSAGE, STALE_AFTER]
+    if job_id is not None:
+        sql += " AND job_id = %s"
+        params.append(job_id)
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(sql, params)
+        conn.commit()
+        return cur.rowcount
 
 
 def update_job(job_id: str, **fields: Any) -> None:

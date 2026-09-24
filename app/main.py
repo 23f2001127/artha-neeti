@@ -1,27 +1,9 @@
-"""ArthaNeeti research API - a job-based wrapper around ``agents.planner``.
+"""ArthaNeeti HTTP API.
 
-A Planner query takes 1-20+ minutes (free-tier LLM pacing), so this layer never
-blocks a request on a run:
-
-    POST /research            -> creates a job row, fires the Planner as a
-                                 detached asyncio task, returns {job_id} at once
-    GET  /research/{job_id}   -> the poll endpoint: status + routing_trace (as
-                                 soon as the route node finishes) + live
-                                 specialist_status + the final report when done
-    GET  /research/{job_id}/report -> just the finished report (409 until done)
-    POST /research/{job_id}/followups -> a cheap, synchronous follow-up on a
-                                 finished report; escalates to a fresh job
-                                 (.../followups/escalate) only if asked
-    GET  /companies           -> full-coverage (3 specialists) vs partial (market
-                                 data + news only) so a client can be upfront
-
-    See app/README.md for the full endpoint list and design notes - this
-    header only sketches the shape.
-
-All job state lives in Postgres (``research_jobs``); the in-memory task handle is
-only kept so it isn't garbage-collected and so failures get logged.
-
-Run:  uvicorn app.main:app --reload
+Research runs take minutes, so they are jobs: POST /research stores a row and
+starts the Planner in the background, and clients poll GET /research/{job_id}
+for routing, per-specialist progress and the finished report. Job state lives
+in Postgres; see app/README.md for the full endpoint reference.
 """
 
 from __future__ import annotations
@@ -47,28 +29,28 @@ from shared import llm_rate_limiter as rl
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("arthaneeti.api")
 
-_TASKS: set[asyncio.Task] = set()  # strong refs so background jobs aren't GC'd
+# The event loop holds tasks weakly; keep background jobs alive until they finish.
+_TASKS: set[asyncio.Task] = set()
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     db.init_schema()
-    log.info("research_jobs schema ready")
+    interrupted = db.fail_stale_jobs()
+    if interrupted:
+        log.warning("closed %d job(s) left unfinished by a previous process", interrupted)
     yield
 
 
 app = FastAPI(
     title="ArthaNeeti",
     version="0.1.0",
-    description="Multi-agent Indian equity research - job-based API over the LangGraph Planner.",
+    description="Multi-agent research on NSE-listed companies.",
     lifespan=lifespan,
 )
 
-# CORS: localhost is always allowed (local dev never breaks); any deployed
-# frontend origin(s) come from CORS_ALLOWED_ORIGINS (comma-separated, e.g.
-# "https://arthaneeti.vercel.app") - set on the backend host once the
-# frontend's real URL is known. Starlette's CORSMiddleware ORs the regex and
-# the explicit list (see is_allowed_origin), so both apply at once.
+# Localhost is always allowed; deployed frontends are listed in
+# CORS_ALLOWED_ORIGINS (comma-separated).
 _cors_extra_origins = [
     o.strip() for o in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()
 ]
@@ -81,20 +63,11 @@ app.add_middleware(
     allow_credentials=False,
 )
 
-# --------------------------------------------------------------------------- #
-# Deployment-only safety limits. Both are no-ops (or effectively unlimited)
-# unless explicitly configured, so local dev is unaffected. The real scarce
-# resource behind these is the shared free-tier LLM quota - see
-# shared/llm_rate_limiter.py's Gemini "generate" bucket (~20 req/day,
-# system-wide): a handful of visitors running one query each can empty it for
-# everyone in a single day, so this is capped globally, not per-visitor.
-# --------------------------------------------------------------------------- #
-_MAX_DAILY_JOBS = int(os.environ.get("MAX_DAILY_JOBS", "0"))  # 0 = unlimited (local dev)
+# The daily cap is global rather than per visitor: the LLM quota it protects is
+# shared by every user of the deployment. 0 disables it.
+_MAX_DAILY_JOBS = int(os.environ.get("MAX_DAILY_JOBS", "0"))
 
-# Coarse per-IP abuse throttle (a crawler/bot hammering the endpoint), separate
-# from the daily cap above. In-memory by design - unlike the LLM quota
-# tracker, this doesn't need to survive a restart; it only needs to blunt a
-# burst within one process's lifetime. {ip: deque[monotonic timestamps]}.
+# Burst protection per client IP. In memory: it only has to hold within one process.
 _THROTTLE_WINDOW_S = 60.0
 _THROTTLE_MAX_PER_WINDOW = int(os.environ.get("IP_THROTTLE_PER_MINUTE", "6"))
 _ip_hits: dict[str, deque[float]] = defaultdict(deque)
@@ -119,11 +92,7 @@ def _check_daily_job_cap() -> None:
     if count >= _MAX_DAILY_JOBS:
         raise HTTPException(
             status_code=429,
-            detail=(
-                "Daily demo quota reached - this is a free-tier deployment sharing a small "
-                "LLM budget across every visitor. Try again tomorrow, or run it locally "
-                "(see the README) with your own API keys."
-            ),
+            detail="Today's research limit has been reached. Please try again tomorrow.",
         )
 
 
@@ -135,7 +104,6 @@ class ResearchRequest(BaseModel):
     )
 
 
-# --------------------------------------------------------------------------- #
 @app.get("/")
 def root() -> dict:
     return {
@@ -154,25 +122,13 @@ def root() -> dict:
 
 @app.get("/status")
 def status() -> dict:
-    """Live shared-quota usage per LLM provider bucket (Groq, Gemini generate,
-    Gemini embed) - the same accounting `shared/llm_rate_limiter.py` uses to
-    pace every call, exposed read-only. Useful for explaining a slow run (a
-    bucket near its daily/per-minute cap) rather than leaving it a mystery."""
+    """Current usage of each rate-limited LLM bucket."""
     return {"buckets": rl.snapshot()}
 
 
 @app.post("/research", status_code=202)
 async def submit_research(req: ResearchRequest, request: Request) -> dict:
-    """Queue a research job. Returns immediately; poll GET /research/{job_id}.
-
-    The run is a detached ``asyncio.create_task`` rather than FastAPI
-    ``BackgroundTasks``: BackgroundTasks are tied to this request's response
-    lifecycle and give no handle to observe or log. This is a long-lived job
-    whose authoritative state is the Postgres row - a bare task on the event
-    loop models that better. (Trade-off: a server restart orphans in-flight
-    jobs, leaving their row at 'running'. A production build would use a real
-    queue or sweep stale rows on startup.)
-    """
+    """Queue a research job and return its id; poll GET /research/{job_id}."""
     _check_ip_throttle(request)
     _check_daily_job_cap()
     query = req.query.strip()
@@ -188,16 +144,18 @@ async def get_research(job_id: uuid.UUID) -> dict:
     row = await asyncio.to_thread(db.get_job, str(job_id))
     if row is None:
         raise HTTPException(status_code=404, detail="job not found")
+    if row["status"] in ("queued", "running") and await asyncio.to_thread(db.fail_stale_jobs, str(job_id)):
+        row = await asyncio.to_thread(db.get_job, str(job_id))
     return {
         "job_id": str(row["job_id"]),
         "query": row["query"],
         "status": row["status"],
         "routing_trace": row["routing_trace"],
-        "routing": row["routing"],  # structured decision, set the same moment as routing_trace
+        "routing": row["routing"],
         "specialist_status": row["specialist_status"],
-        "estimated_duration_seconds": row["estimated_duration_seconds"],  # real historical avg; null until routing lands or there's no history yet
-        "estimated_duration_samples": row["estimated_duration_samples"],  # how many past jobs backed that number
-        "report": row["report"],  # null until the run finishes
+        "estimated_duration_seconds": row["estimated_duration_seconds"],
+        "estimated_duration_samples": row["estimated_duration_samples"],
+        "report": row["report"],
         "error": row["error"],
         "conversation_id": str(row["conversation_id"]) if row["conversation_id"] else None,
         "parent_job_id": str(row["parent_job_id"]) if row["parent_job_id"] else None,
@@ -216,8 +174,7 @@ class EscalateFollowupRequest(BaseModel):
 
 @app.get("/research/{job_id}/report")
 async def get_report(job_id: uuid.UUID) -> dict:
-    """Just the finished report. 409 while the job is still queued/running, so a
-    client can call this directly once it sees status == 'done' from the poll."""
+    """The finished report; 409 while the job is still queued or running."""
     row = await asyncio.to_thread(db.get_job, str(job_id))
     if row is None:
         raise HTTPException(status_code=404, detail="job not found")
@@ -256,7 +213,7 @@ async def get_report_pdf(job_id: uuid.UUID) -> Response:
             report = {**report, "visuals": visuals}
     try:
         pdf_bytes = await asyncio.to_thread(render_report_pdf, report)
-    except Exception as exc:  # noqa: BLE001 - a rendering bug must not 500 opaquely
+    except Exception as exc:  # noqa: BLE001
         log.exception("PDF render failed for job %s", job_id)
         raise HTTPException(status_code=500, detail=f"could not render PDF: {exc}") from exc
 
@@ -271,12 +228,11 @@ async def get_report_pdf(job_id: uuid.UUID) -> Response:
 
 @app.post("/research/{job_id}/followups")
 async def ask_followup(job_id: uuid.UUID, req: FollowupRequest) -> dict:
-    """A cheap, synchronous follow-up on a finished report - one LLM call
-    grounded in what that report already contains, answered within this
-    request (no job/poll needed). If the report doesn't have enough to answer,
-    the response says so (`sufficient_data: false`, `missing_reason`) and
-    hands back a `standalone_query` - POST it to .../followups/escalate to run
-    a proper fresh research job instead. See agents/followup_agent.py."""
+    """Answer a follow-up question from the finished report in one LLM call.
+
+    When the report can't answer it, the response carries
+    ``sufficient_data: false`` and a ``standalone_query`` to send to
+    .../followups/escalate for a new research run."""
     try:
         return await followups.ask(str(job_id), req.query.strip())
     except followups.FollowupError as exc:
@@ -310,10 +266,7 @@ async def list_followups(job_id: uuid.UUID) -> dict:
 
 @app.post("/research/{job_id}/followups/escalate", status_code=202)
 async def escalate_followup(job_id: uuid.UUID, req: EscalateFollowupRequest, request: Request) -> dict:
-    """Runs a brand-new Planner query continuing this conversation
-    (conversation_id inherited, parent_job_id set to this job) - the same
-    asyncio.create_task + app.jobs.run_job dispatch as POST /research. Poll
-    the returned job_id exactly like a normal research job."""
+    """Start a new research job that continues this conversation."""
     _check_ip_throttle(request)
     _check_daily_job_cap()
     try:
@@ -330,15 +283,8 @@ async def escalate_followup(job_id: uuid.UUID, req: EscalateFollowupRequest, req
 
 @app.get("/companies")
 def list_companies() -> dict:
-    """What the system can meaningfully answer about.
-
-    full_coverage: all three specialists, including RAG over the company's actual
-    annual report - the seeded corpus plus anything since uploaded or auto-fetched
-    (``agents.filings_agent.ingested_tickers()``, DB-backed).
-    partial_coverage: any NSE-listed company that resolves on yfinance still gets
-    market data + news/sentiment; filings analysis is simply skipped, with a
-    stated reason in the routing trace.
-    """
+    """Companies with an indexed annual report (all three specialists), and the
+    market-data-and-news coverage every other NSE company gets."""
     from mcp_servers.filings_rag_mcp import db as filings_db
 
     names = filings_db.company_names()
@@ -352,11 +298,8 @@ def list_companies() -> dict:
         "partial_coverage": {
             "specialists": ["market_data", "news_sentiment"],
             "note": (
-                "Any NSE-listed company that resolves on yfinance. Filings analysis "
-                "is only available for the full-coverage list above (one annual "
-                "report each), and is skipped with a reason for everything else. "
-                "Missing a company's filing? POST /filings/upload adds one, or "
-                "POST /filings/fetch tries to find and ingest it automatically."
+                "Any NSE-listed company. Annual-report analysis needs the company's report "
+                "indexed first: POST /filings/upload or POST /filings/fetch."
             ),
         },
     }
@@ -376,13 +319,7 @@ async def upload_filing(
     company: str | None = Form(None, description="Display name; defaults to the ticker."),
     fiscal_year: str | None = Form(None, description="e.g. '2024-25'; left blank if unknown."),
 ) -> dict:
-    """Ingest an ad-hoc annual-report PDF into the filings RAG corpus, so the
-    Filings Agent (and Planner routing) can answer questions about a company
-    outside the 10 seeded ones. Returns immediately; poll
-    GET /filings/jobs/{job_id}. Same asyncio.create_task pattern as
-    POST /research, for the same reason - this can run for minutes against the
-    shared embedding rate limit.
-    """
+    """Index an uploaded annual-report PDF; poll GET /filings/jobs/{job_id}."""
     _check_ip_throttle(request)
     content = await file.read()
     try:
@@ -408,16 +345,10 @@ async def upload_filing(
 
 @app.post("/filings/fetch", status_code=202)
 async def fetch_filing(req: FetchFilingRequest, request: Request) -> dict:
-    """Best-effort alternative to /filings/upload: search the web for the
-    company's annual-report PDF and ingest it automatically - no file needed.
+    """Search for the company's annual-report PDF and index it.
 
-    This is genuinely best-effort (see mcp_servers/filings_rag_mcp/fetch.py's
-    docstring for exactly why): it only accepts a search result that is
-    itself a direct PDF link, and does not scrape HTML pages for one. A miss
-    ends the job with status='error' and a message pointing at
-    POST /filings/upload as the reliable fallback - it is not a bug, just a
-    search that didn't turn up a direct link this time.
-    """
+    Only direct PDF links in search results are accepted; when none is found the
+    job ends in 'error' and the client should offer an upload instead."""
     _check_ip_throttle(request)
     try:
         norm_ticker = filings.validate_fetch_request(req.ticker)

@@ -79,20 +79,41 @@ def _progress_writer(job_id: str) -> Callable[[dict], None]:
     return write
 
 
+RUN_FAILED_MESSAGE = "The research run failed unexpectedly. Please try again."
+
+
+async def _heartbeat(job_id: str) -> None:
+    """Keeps updated_at fresh so other processes can tell this job is alive."""
+    while True:
+        await asyncio.sleep(db.HEARTBEAT_SECONDS)
+        try:
+            await asyncio.to_thread(db.touch_job, job_id)
+        except Exception:  # noqa: BLE001
+            log.warning("heartbeat failed for job %s", job_id, exc_info=True)
+
+
 async def run_job(job_id: str, query: str) -> None:
+    beat = asyncio.create_task(_heartbeat(job_id))
+    try:
+        await _run(job_id, query)
+    finally:
+        beat.cancel()
+
+
+async def _run(job_id: str, query: str) -> None:
     try:
         db.update_job(job_id, status="running")
         result = await planner.plan(query, on_progress=_progress_writer(job_id))
-    except BaseException as exc:  # noqa: BLE001 - planner has its own guards; this is the last line
+    except BaseException:  # noqa: BLE001 - last line of defence; the planner guards its own nodes
         log.exception("job %s crashed", job_id)
-        db.update_job(job_id, status="error", error=f"{type(exc).__name__}: {exc}")
+        db.update_job(job_id, status="error", error=RUN_FAILED_MESSAGE)
         return
 
-    # planner.plan returns {"query", "error"} (no "routing" key) only on a total
-    # failure - bad query, or the graph itself blew up. A run where every
-    # specialist 429'd still comes back as a real (degraded) report.
+    # Only a total failure (no routing at all) is an error; a run where some
+    # specialists failed still produces a degraded report.
     if isinstance(result, dict) and "error" in result and "routing" not in result:
-        db.update_job(job_id, status="error", error=str(result["error"]), report=result)
+        log.error("job %s failed: %s", job_id, result["error"])
+        db.update_job(job_id, status="error", error=RUN_FAILED_MESSAGE, report=result)
     else:
         result["visuals"] = await build_visuals(result)
         db.update_job(
