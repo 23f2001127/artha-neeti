@@ -31,7 +31,6 @@ escalation, and keeps this agent the same size as synthesis_agent's own
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -181,7 +180,7 @@ async def answer_followup(
     msgs = [
         _base.SystemMessage(_SYSTEM_PROMPT),
         _base.HumanMessage(
-            f"CONTEXT (JSON):\n{json.dumps(payload, indent=2, default=str)}\n\n"
+            f"CONTEXT (JSON):\n{_base.prompt_json(payload)}\n\n"
             f"NEW FOLLOW-UP QUESTION:\n{follow_up_query.strip()}"
         ),
     ]
@@ -193,10 +192,7 @@ async def answer_followup(
         if isinstance(result, dict):
             result = _FollowupAnswer(**result)
     except BaseException as exc:  # noqa: BLE001 - unwrap anyio/limiter groups
-        flat = _base.flatten_exc(exc)
-        quota = next((e for e in flat if isinstance(e, _base.rl.QuotaExceededError)), None)
-        primary = quota or (flat[0] if flat else exc)
-        return {"error": ("LLM quota: " if quota else "") + f"{type(primary).__name__}: {primary}"}
+        return {"error": _base.describe_error(exc)}
 
     if result.sufficient_data and not (result.answer or "").strip():
         # A model that says "yes I can answer" but returns nothing is really a

@@ -51,7 +51,6 @@ and it names which specialist(s) the claim came from (``sources_by_claim``).
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
 from typing import Any
 
@@ -307,7 +306,7 @@ async def synthesize(
     compacted = [_compact_specialist(k, ok[k]) for k in ok] + [
         _compact_specialist(k, failed[k]) for k in failed
     ]
-    payload = json.dumps(compacted, indent=2, default=str)
+    payload = _base.prompt_json(compacted)
     trace: list[dict] = [{
         "step": "inputs",
         "ok": sorted(ok),
@@ -322,12 +321,9 @@ async def synthesize(
         model = _base.make_model(model_name, max_tokens=3500)
         report = await _run_synthesis(model, query, payload)
     except BaseException as exc:  # noqa: BLE001 - unwrap anyio/limiter groups
-        flat = _base.flatten_exc(exc)
-        quota = next((e for e in flat if isinstance(e, _base.rl.QuotaExceededError)), None)
-        primary = quota or (flat[0] if flat else exc)
         return {
             "query": query,
-            "error": ("LLM quota: " if quota else "") + f"{type(primary).__name__}: {primary}",
+            "error": _base.describe_error(exc),
             "inputs_received": {"ok": sorted(ok), "failed": sorted(failed), "missing": sorted(missing)},
         }
 

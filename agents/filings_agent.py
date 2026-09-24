@@ -256,10 +256,9 @@ def _compact(_tool: str, result: Any) -> Any:
 
 async def _synthesize(model, query: str, call_log: list[dict]) -> dict:
     structured = model.with_structured_output(_FilingsSynthesis)
-    payload = json.dumps(
+    payload = _base.prompt_json(
         [{"tool": c["tool"], "args": c["args"], "result": _compact(c["tool"], c["result"])}
-         for c in call_log],
-        default=str, indent=2,
+         for c in call_log]
     )
     msgs = [
         _base.SystemMessage(_SYNTH_INSTRUCTIONS),

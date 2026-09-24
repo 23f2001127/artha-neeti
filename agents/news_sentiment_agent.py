@@ -153,9 +153,8 @@ def _compact(result: Any) -> Any:
 
 async def _synthesize(model, query: str, call_log: list[dict]) -> dict:
     structured = model.with_structured_output(_NewsSynthesis)
-    payload = json.dumps(
-        [{"tool": c["tool"], "args": c["args"], "result": _compact(c["result"])} for c in call_log],
-        default=str, indent=2,
+    payload = _base.prompt_json(
+        [{"tool": c["tool"], "args": c["args"], "result": _compact(c["result"])} for c in call_log]
     )
     msgs = [
         _base.SystemMessage(_SYNTH_INSTRUCTIONS),
@@ -252,6 +251,7 @@ async def run(query: str, *, model_name: str = DEFAULT_MODEL, on_stage=None) -> 
         synthesize=_synthesize,
         collect_provenance=_collect_provenance,
         model_name=model_name,
+        compact_tool_result=lambda _tool, result: _compact(result),
         on_stage=on_stage,
     )
 

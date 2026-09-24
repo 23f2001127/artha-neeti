@@ -17,6 +17,7 @@ import asyncio
 import functools
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -91,20 +92,81 @@ def flatten_exc(exc: BaseException) -> list[BaseException]:
     return out
 
 
+class RequestTooLargeError(AgentError):
+    """A single request exceeded the model's per-request token limit."""
+
+
+# Groq's free tier rejects (413) any single request whose input plus max_tokens
+# exceeds the model's tokens-per-minute limit - 8,000 for every model in the
+# chain, so rotating models never helps. Requests are fitted below this before
+# they are sent.
+REQUEST_TOKEN_LIMIT = int(os.environ.get("GROQ_REQUEST_TOKEN_LIMIT", "8000"))
+_OUTPUT_RESERVE = 1500
+_FIT_CHARS_PER_TOKEN = 3.0
+_MIN_KEEP_CHARS = 400
+_REQUESTED_RE = re.compile(r"requested\s+(\d+)", re.IGNORECASE)
+
+
+def prompt_json(obj: Any) -> str:
+    """Compact JSON for prompt payloads (pretty-printing roughly doubles tokens)."""
+    return json.dumps(obj, default=str, separators=(",", ":"), ensure_ascii=False)
+
+
+def _content_len(m: Any) -> int:
+    content = getattr(m, "content", m)
+    return len(content if isinstance(content, str) else str(content))
+
+
 def estimate_tokens(messages: list) -> int:
-    """Conservative token estimate for the shared limiter. ~3 chars/token (not 4)
-    because agent prompts are JSON/schema-dense, plus a fat output allowance -
-    structured-output replies (synthesis reports, routing decisions) run
-    1-2k tokens. Under-estimating here is what lets the limiter wave through a
-    call that Groq then 429s, so this errs high on purpose."""
-    chars = 0
-    for m in messages:
-        content = getattr(m, "content", m)
-        chars += len(content if isinstance(content, str) else str(content))
-    return chars // 3 + 1200
+    """Conservative token estimate for the shared limiter, including an output
+    allowance. Errs high: under-estimating lets the limiter admit calls Groq
+    then rejects."""
+    return sum(_content_len(m) for m in messages) // 3 + 1200
+
+
+def fit_messages(messages: list, max_input_tokens: int) -> list:
+    """Return a copy of ``messages`` whose estimated input fits the budget.
+
+    Shrinks the largest tool/human message contents first, keeping the head of
+    each and marking the cut. System messages are never trimmed. A last-resort
+    guard - agents compact their tool payloads semantically before this runs.
+    """
+    budget_chars = int(max_input_tokens * _FIT_CHARS_PER_TOKEN)
+    total = sum(_content_len(m) for m in messages)
+    if total <= budget_chars:
+        return messages
+
+    out = list(messages)
+    shrinkable = sorted(
+        (i for i, m in enumerate(out)
+         if isinstance(m, (ToolMessage, HumanMessage)) and isinstance(m.content, str)),
+        key=lambda i: len(out[i].content),
+        reverse=True,
+    )
+    excess = total - budget_chars
+    for i in shrinkable:
+        if excess <= 0:
+            break
+        text = out[i].content
+        keep = max(_MIN_KEEP_CHARS, len(text) - excess)
+        if keep >= len(text):
+            continue
+        cut = len(text) - keep
+        out[i] = out[i].model_copy(
+            update={"content": text[:keep] + f"\n...[{cut} characters omitted to fit the model's request limit]"}
+        )
+        excess -= cut
+    return out
+
+
+def is_too_large_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "413" in text or "request too large" in text or "payload too large" in text
 
 
 def is_rate_error(exc: BaseException) -> bool:
+    if is_too_large_error(exc):
+        return False
     text = str(exc).lower()
     return (
         "resource_exhausted" in text
@@ -112,15 +174,28 @@ def is_rate_error(exc: BaseException) -> bool:
         or "rate_limit" in text
         or "rate limit" in text
         or "quota" in text
-        # 413 (payload too large) observed for real on Groq: a large tool-result
-        # payload pushed one call over the model's request-size ceiling. It isn't
-        # a quota problem, but the fix is the same - rotate to the next candidate
-        # rather than fail the whole agent run outright.
-        or "413" in text
-        or "payload too large" in text
-        or "request too large" in text
-        or "request_too_large" in text
     )
+
+
+def describe_error(exc: BaseException) -> str:
+    """One-line error for job status and reports, labelled by real cause."""
+    flat = flatten_exc(exc)
+    known = next(
+        (e for e in flat if isinstance(e, (rl.QuotaExceededError, RequestTooLargeError))), None
+    )
+    primary = known or (flat[0] if flat else exc)
+    if isinstance(primary, rl.QuotaExceededError):
+        label = "LLM rate limit: "
+    elif isinstance(primary, RequestTooLargeError):
+        label = "Request too large: "
+    else:
+        label = ""
+    return f"{label}{type(primary).__name__}: {primary}"
+
+
+def _requested_tokens(exc: BaseException) -> int | None:
+    match = _REQUESTED_RE.search(str(exc))
+    return int(match.group(1)) if match else None
 
 
 def msg_text(content: Any) -> str:
@@ -142,24 +217,32 @@ def msg_text(content: Any) -> str:
 # Groq chat model, rate-limited + model-rotating through the shared limiter
 # --------------------------------------------------------------------------- #
 class RateLimitedChatGroq(ChatGroq):
-    """ChatGroq that clears shared/llm_rate_limiter before every call and rotates
-    through a model-fallback chain on a 429. One object, so it drops straight into
-    create_react_agent.
+    """ChatGroq that paces every call through the shared limiter, fits each
+    request under the per-request token limit, and rotates through a fallback
+    chain on genuine rate limiting. Drops straight into ``create_react_agent``.
 
-    One reservation per call against a SINGLE ``"groq"`` bucket (not per model):
-    Groq's free tier rate-limits account-wide, so three per-model buckets let the
-    limiter wave through calls Groq then 429s. Model rotation stays as a cheap
-    extra retry under that one reservation - if every candidate still 429s the
-    reservation is refunded and QuotaExceededError raised.
-
-    The candidate chain is stashed via object.__setattr__ (pydantic ignores names
-    it doesn't declare as fields); ``model_name`` is swapped in place per attempt.
+    One reservation per call against a single account-wide ``"groq"`` bucket.
+    A 413 (request too large) is retried once on the same model with a tighter
+    budget; rotating would not help since every model shares the limit.
     """
 
     def _candidates(self) -> list[str]:
         return list(getattr(self, "_rl_chain", None) or [self.model_name])
 
+    def _input_budget(self, kwargs: dict) -> int:
+        # Bound tool/structured-output schemas are sent with every request too.
+        schema_tokens = int(len(json.dumps(kwargs.get("tools") or [], default=str)) / _FIT_CHARS_PER_TOKEN)
+        return REQUEST_TOKEN_LIMIT - (self.max_tokens or _OUTPUT_RESERVE) - schema_tokens - 200
+
+    def _refit_after_413(self, messages: list, exc: BaseException, budget: int) -> tuple[list, int]:
+        requested = _requested_tokens(exc)
+        ratio = (REQUEST_TOKEN_LIMIT / requested) if requested else 0.6
+        tighter = max(1000, int(budget * min(ratio, 0.9) * 0.85))
+        return fit_messages(messages, tighter), tighter
+
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        budget = self._input_budget(kwargs)
+        messages = fit_messages(messages, budget)
         original = self.model_name
         rid = rl.acquire(estimate_tokens(messages), "groq", timeout=240.0)
         errs: list[str] = []
@@ -167,24 +250,32 @@ class RateLimitedChatGroq(ChatGroq):
         try:
             for cand in self._candidates():
                 object.__setattr__(self, "model_name", cand)
-                try:
-                    out = super()._generate(messages, stop, run_manager, **kwargs)
-                    used = True
-                    return out
-                except BaseException as exc:  # noqa: BLE001
-                    if is_rate_error(exc):
-                        errs.append(f"{cand}: 429")
-                        continue
-                    raise
-            raise rl.QuotaExceededError(
-                "every candidate Groq model 429'd on one shared reservation: " + " | ".join(errs)
-            )
+                for attempt in range(2):
+                    try:
+                        out = super()._generate(messages, stop, run_manager, **kwargs)
+                        used = True
+                        return out
+                    except BaseException as exc:  # noqa: BLE001
+                        if is_too_large_error(exc) and attempt == 0:
+                            messages, budget = self._refit_after_413(messages, exc, budget)
+                            continue
+                        if is_too_large_error(exc):
+                            raise RequestTooLargeError(
+                                f"request still exceeds {cand}'s {REQUEST_TOKEN_LIMIT}-token limit after compaction"
+                            ) from exc
+                        if is_rate_error(exc):
+                            errs.append(f"{cand}: rate limited")
+                            break
+                        raise
+            raise rl.QuotaExceededError("all fallback models are rate limited: " + " | ".join(errs))
         finally:
             object.__setattr__(self, "model_name", original)
             if not used:
                 rl.refund(rid, "groq")
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        budget = self._input_budget(kwargs)
+        messages = fit_messages(messages, budget)
         original = self.model_name
         rid = await asyncio.to_thread(
             functools.partial(rl.acquire, estimate_tokens(messages), "groq", timeout=240.0)
@@ -194,18 +285,24 @@ class RateLimitedChatGroq(ChatGroq):
         try:
             for cand in self._candidates():
                 object.__setattr__(self, "model_name", cand)
-                try:
-                    out = await super()._agenerate(messages, stop, run_manager, **kwargs)
-                    used = True
-                    return out
-                except BaseException as exc:  # noqa: BLE001
-                    if is_rate_error(exc):
-                        errs.append(f"{cand}: 429")
-                        continue
-                    raise
-            raise rl.QuotaExceededError(
-                "every candidate Groq model 429'd on one shared reservation: " + " | ".join(errs)
-            )
+                for attempt in range(2):
+                    try:
+                        out = await super()._agenerate(messages, stop, run_manager, **kwargs)
+                        used = True
+                        return out
+                    except BaseException as exc:  # noqa: BLE001
+                        if is_too_large_error(exc) and attempt == 0:
+                            messages, budget = self._refit_after_413(messages, exc, budget)
+                            continue
+                        if is_too_large_error(exc):
+                            raise RequestTooLargeError(
+                                f"request still exceeds {cand}'s {REQUEST_TOKEN_LIMIT}-token limit after compaction"
+                            ) from exc
+                        if is_rate_error(exc):
+                            errs.append(f"{cand}: rate limited")
+                            break
+                        raise
+            raise rl.QuotaExceededError("all fallback models are rate limited: " + " | ".join(errs))
         finally:
             object.__setattr__(self, "model_name", original)
             if not used:
@@ -377,12 +474,9 @@ async def run_agent(
             synth = await synthesize(model, query, call_log)
             trace = extract_trace(state["messages"])
     except BaseException as exc:  # noqa: BLE001 - unwrap anyio/MCP ExceptionGroups
-        flat = flatten_exc(exc)
-        quota = next((e for e in flat if isinstance(e, rl.QuotaExceededError)), None)
-        primary = quota or (flat[0] if flat else exc)
         return {
             "query": query,
-            "error": ("LLM quota: " if quota else "") + f"{type(primary).__name__}: {primary}",
+            "error": describe_error(exc),
             "tools_called": [c["tool"] for c in call_log],
             "partial_raw_data": {c["tool"]: c["result"] for c in call_log} or None,
         }

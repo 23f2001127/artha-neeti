@@ -604,7 +604,7 @@ async def _compare_node(state: PlannerState) -> dict:
         _base.SystemMessage(_COMPARE_PROMPT),
         _base.HumanMessage(
             f"ORIGINAL USER QUERY:\n{state['query']}\n\n"
-            f"PER-COMPANY REPORTS (JSON):\n{json.dumps(digest, indent=2, default=str)}"
+            f"PER-COMPANY REPORTS (JSON):\n{_base.prompt_json(digest)}"
         ),
     ])
     if isinstance(comp, dict):
@@ -698,8 +698,8 @@ async def _portfolio_node(state: PlannerState) -> dict:
         _base.SystemMessage(_PORTFOLIO_PROMPT),
         _base.HumanMessage(
             f"ORIGINAL USER QUERY:\n{state['query']}\n\n"
-            f"COMPUTED WEIGHTED METRICS + SECTOR ALLOCATION (JSON):\n{json.dumps(computed, indent=2, default=str)}\n\n"
-            f"PER-HOLDING REPORTS (JSON):\n{json.dumps(digest, indent=2, default=str)}"
+            f"COMPUTED WEIGHTED METRICS + SECTOR ALLOCATION (JSON):\n{_base.prompt_json(computed)}\n\n"
+            f"PER-HOLDING REPORTS (JSON):\n{_base.prompt_json(digest)}"
         ),
     ])
     if isinstance(assessment, dict):
@@ -790,13 +790,7 @@ async def plan(
             config={"recursion_limit": 25},
         )
     except BaseException as exc:  # noqa: BLE001
-        flat = _base.flatten_exc(exc)
-        quota = next((e for e in flat if isinstance(e, _base.rl.QuotaExceededError)), None)
-        head = quota or (flat[0] if flat else exc)
-        return {
-            "query": query,
-            "error": ("LLM quota: " if quota else "") + f"{type(head).__name__}: {head}",
-        }
+        return {"query": query, "error": _base.describe_error(exc)}
     finally:
         if token is not None:
             _progress_cb.reset(token)

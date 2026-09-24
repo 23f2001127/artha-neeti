@@ -93,11 +93,49 @@ _PROVENANCE_KEYS = (
 )
 
 
+_PRICE_SAMPLES = 12
+
+
+def _summarize_history(rows: list[dict]) -> dict:
+    closes = [r["close"] for r in rows if isinstance(r.get("close"), (int, float))]
+    highs = [r["high"] for r in rows if isinstance(r.get("high"), (int, float))]
+    lows = [r["low"] for r in rows if isinstance(r.get("low"), (int, float))]
+    vols = [r["volume"] for r in rows if isinstance(r.get("volume"), (int, float))]
+    if not closes:
+        return {}
+    step = max(1, len(rows) // _PRICE_SAMPLES)
+    sampled = [{"date": r["date"], "close": r["close"]} for r in rows[::step]]
+    if sampled[-1]["date"] != rows[-1]["date"]:
+        sampled.append({"date": rows[-1]["date"], "close": rows[-1]["close"]})
+    return {
+        "first_close": closes[0],
+        "last_close": closes[-1],
+        "change_pct": round((closes[-1] / closes[0] - 1) * 100, 2) if closes[0] else None,
+        "period_high": max(highs) if highs else None,
+        "period_low": min(lows) if lows else None,
+        "avg_volume": int(sum(vols) / len(vols)) if vols else None,
+        "sampled_closes": sampled,
+    }
+
+
+def _compact(tool: str, result: Any) -> Any:
+    """Replace daily OHLCV rows with summary statistics and a sampled series.
+    ``raw_data`` keeps the full payload; only what the model reads shrinks."""
+    if tool != "get_price_history" or not isinstance(result, dict):
+        return result
+    history = result.get("history")
+    if not isinstance(history, list):
+        return result
+    out = {k: v for k, v in result.items() if k != "history"}
+    out["summary"] = _summarize_history(history)
+    return out
+
+
 async def _synthesize(model, query: str, call_log: list[dict]) -> dict:
     structured = model.with_structured_output(_MarketDataSynthesis)
-    payload = json.dumps(
-        [{"tool": c["tool"], "args": c["args"], "result": c["result"]} for c in call_log],
-        default=str, indent=2,
+    payload = _base.prompt_json(
+        [{"tool": c["tool"], "args": c["args"], "result": _compact(c["tool"], c["result"])}
+         for c in call_log]
     )
     msgs = [
         _base.SystemMessage(_SYNTH_INSTRUCTIONS),
@@ -137,6 +175,7 @@ async def run(query: str, *, model_name: str = DEFAULT_MODEL, on_stage=None) -> 
         synthesize=_synthesize,
         collect_provenance=_collect_provenance,
         model_name=model_name,
+        compact_tool_result=_compact,
         on_stage=on_stage,
     )
 
