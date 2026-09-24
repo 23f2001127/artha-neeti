@@ -1,164 +1,205 @@
 import { useState } from "react";
 import RoutingPanel from "../progress/RoutingPanel";
-import CompanyReportCard from "./CompanyReportCard";
-import ComparisonView from "./ComparisonView";
-import PortfolioView from "./PortfolioView";
-import FollowUpPanel from "../followup/FollowUpPanel";
+import FollowUpDrawer from "../followup/FollowUpDrawer";
+import CompanyDashboard from "./CompanyDashboard";
+import ComparisonSection from "./ComparisonSection";
+import PortfolioSection from "./PortfolioSection";
+import ShareMenu from "./ShareMenu";
+import { useVisuals } from "./useVisuals";
 import { downloadReportPdf, ApiError } from "../../lib/api";
-
-function CopyLinkButton() {
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      onClick={() => {
-        navigator.clipboard?.writeText(window.location.href);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      }}
-      className="text-[12px] text-[var(--color-ink-muted)] hover:text-[var(--color-brand)] border border-[var(--color-border)] rounded-[var(--radius-sm)] px-3 py-1.5 transition-colors cursor-pointer"
-    >
-      {copied ? "Link copied" : "Copy link"}
-    </button>
-  );
-}
+import { DownloadIcon, PlusIcon } from "../../components/ui/icons";
+import { formatDate } from "../../lib/format";
 
 function DownloadPdfButton({ jobId, tickers }) {
-  const [state, setState] = useState("idle"); // idle | downloading | error
-  async function handleClick() {
-    setState("downloading");
+  const [state, setState] = useState("idle");
+  async function download() {
+    setState("working");
     try {
       const slug = tickers.map((t) => t.toLowerCase()).join("-") || "report";
       await downloadReportPdf(jobId, `arthaneeti-${slug}.pdf`);
       setState("idle");
     } catch (err) {
-      setState("error");
+      setState(err instanceof ApiError ? "error" : "error");
       setTimeout(() => setState("idle"), 2500);
-      console.error(err instanceof ApiError ? err.message : err);
     }
   }
   return (
     <button
-      onClick={handleClick}
-      disabled={state === "downloading"}
-      className="text-[12px] text-[var(--color-ink-muted)] hover:text-[var(--color-brand)] border border-[var(--color-border)] rounded-[var(--radius-sm)] px-3 py-1.5 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+      onClick={download}
+      disabled={state === "working"}
+      className="inline-flex items-center gap-2 h-10 px-4 text-[13.5px] font-medium rounded-[var(--radius-sm)] border border-[var(--color-border-strong)] text-[var(--color-ink)] hover:bg-[var(--color-surface-muted)] transition-colors disabled:opacity-60 cursor-pointer"
     >
-      {state === "downloading" ? "Preparing…" : state === "error" ? "Couldn't download" : "Download PDF"}
+      <DownloadIcon className="h-4 w-4" />
+      {state === "working" ? "Preparing PDF…" : state === "error" ? "Download failed" : "Download PDF"}
     </button>
   );
 }
 
-export default function ReportView({ job, onNewQuery, onEscalate }) {
-  const [showRouting, setShowRouting] = useState(false);
-  const report = job.report;
+function reportKind(report) {
+  if (report.portfolio) return "Portfolio review";
+  if (report.comparison) return "Company comparison";
+  if (report.mode === "multi") return "Multi-company research";
+  return "Company research";
+}
 
-  // Total failure: the job itself errored and there is no usable report.
-  if (job.status === "error" && !report) {
-    return (
-      <div className="mx-auto max-w-[720px] px-6 pt-16">
-        <p className="text-[11px] uppercase tracking-wide text-[var(--color-ink-faint)] mb-1">Research query</p>
-        <h1 className="text-[19px] font-semibold text-[var(--color-ink)] mb-4">{job.query}</h1>
-        <div className="rounded-[var(--radius-md)] border border-[var(--color-error-tint)] bg-[var(--color-error-tint)] px-4 py-3 mb-4">
-          <p className="text-[13.5px] text-[var(--color-error)]">{job.error || "The run failed."}</p>
-        </div>
-        {job.routing && <RoutingPanel routing={job.routing} routingTrace={job.routing_trace} />}
+function Tabs({ tabs, value, onChange }) {
+  return (
+    <div className="flex gap-1 overflow-x-auto border-b border-[var(--color-border)] mb-6" role="tablist">
+      {tabs.map((t) => (
+        <button
+          key={t.id}
+          role="tab"
+          aria-selected={value === t.id}
+          onClick={() => onChange(t.id)}
+          className={`relative shrink-0 px-4 py-3 text-[14px] font-medium transition-colors cursor-pointer ${
+            value === t.id ? "text-[var(--color-ink)]" : "text-[var(--color-ink-faint)] hover:text-[var(--color-ink-muted)]"
+          }`}
+        >
+          {t.label}
+          {value === t.id && <span className="absolute inset-x-3 -bottom-px h-[2px] rounded-full bg-[var(--color-brand)]" />}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function Notice({ title, body, onNewQuery }) {
+  return (
+    <div className="page py-16">
+      <div className="max-w-[640px] rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] p-8">
+        <h1 className="text-[20px] font-semibold text-[var(--color-ink)]">{title}</h1>
+        <p className="mt-2 text-[14.5px] leading-relaxed text-[var(--color-ink-muted)]">{body}</p>
         <button
           onClick={onNewQuery}
-          className="mt-6 text-[13px] font-medium px-4 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-brand)] text-[var(--color-bg)] hover:bg-[var(--color-brand-soft)] transition-colors cursor-pointer"
+          className="mt-6 h-10 px-5 text-[14px] font-semibold rounded-[var(--radius-sm)] bg-[var(--color-brand)] text-[var(--color-on-brand)] hover:bg-[var(--color-brand-soft)] transition-colors cursor-pointer"
         >
-          Try another query
+          Start a new report
         </button>
       </div>
-    );
-  }
+    </div>
+  );
+}
 
-  if (!report) {
+export default function ReportView({ job, onNewQuery, onOpenJob }) {
+  const report = job.report;
+  const { visuals, loading: chartsLoading } = useVisuals(job);
+  const tickers = Object.keys(report?.reports || {});
+  const isMulti = tickers.length > 1;
+  const [tab, setTab] = useState(isMulti ? "overview" : tickers[0]);
+  const [showMethod, setShowMethod] = useState(false);
+
+  if (job.status === "error" && !report) {
     return (
-      <div className="mx-auto max-w-[720px] px-6 pt-16">
-        <p className="text-[13px] text-[var(--color-ink-muted)]">No report available for this job.</p>
-      </div>
+      <Notice
+        title="This report couldn't be completed"
+        body="Something went wrong while the research was running. Please try again in a few minutes."
+        onNewQuery={onNewQuery}
+      />
+    );
+  }
+  if (!report || report.mode === "none") {
+    return (
+      <Notice
+        title="We couldn't identify a listed company"
+        body="Try naming the company or its NSE ticker, for example “Give me a research view on Infosys” or “Compare TCS and Wipro”."
+        onNewQuery={onNewQuery}
+      />
     );
   }
 
-  const tickers = Object.keys(report.reports || {});
-  const isMulti = report.mode === "multi";
-  const isNone = report.mode === "none";
+  const companies = report.routing?.companies_identified || [];
+  const nameFor = (t) => visuals?.companies?.[t]?.name || companies.find((c) => c.ticker === t)?.name || t;
+  const title = report.query || job.query;
+  const tabs = [
+    { id: "overview", label: report.portfolio ? "Portfolio" : "Comparison" },
+    ...tickers.map((t) => ({ id: t, label: nameFor(t) })),
+  ];
 
   return (
-    <div className="mx-auto max-w-[860px] px-6 pt-10 pb-24">
-      <div className="flex items-start justify-between gap-4 mb-2 fade-up">
-        <div>
-          <p className="text-[11px] uppercase tracking-wide text-[var(--color-ink-faint)] mb-1">Research query</p>
-          <h1 className="text-[19px] font-semibold text-[var(--color-ink)] leading-snug max-w-[600px]">
-            {report.query || job.query}
-          </h1>
-        </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <CopyLinkButton />
-          {!isNone && <DownloadPdfButton jobId={job.job_id} tickers={tickers} />}
-          <button
-            onClick={onNewQuery}
-            className="text-[12px] font-medium text-[var(--color-bg)] bg-[var(--color-brand)] hover:bg-[var(--color-brand-soft)] rounded-[var(--radius-sm)] px-3 py-1.5 transition-colors cursor-pointer"
-          >
-            New query
-          </button>
-        </div>
-      </div>
-
-      <div className="mb-6 fade-up">
-        <button
-          onClick={() => setShowRouting((v) => !v)}
-          className="text-[11.5px] text-[var(--color-ink-faint)] hover:text-[var(--color-ink-muted)] underline decoration-dotted cursor-pointer"
-        >
-          {showRouting ? "Hide" : "How was this routed?"}
-        </button>
-        {showRouting && (
-          <div className="mt-3">
-            <RoutingPanel routing={report.routing} routingTrace={report.routing_trace} />
-          </div>
-        )}
-      </div>
-
-      {isNone && (
-        <div className="rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-muted)] px-4 py-3">
-          <p className="text-[13.5px] text-[var(--color-ink-muted)]">
-            {report.note || "No company could be resolved for this query."}
-          </p>
-        </div>
-      )}
-
-      {!isNone && isMulti && (
-        <div className="space-y-8">
-          <ComparisonView comparison={report.comparison} />
-          <PortfolioView portfolio={report.portfolio} />
-          <div>
-            <h2 className="text-[13px] font-semibold uppercase tracking-wide text-[var(--color-ink)] mb-4">
-              Per-company reports
-            </h2>
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <div className="pb-28">
+      <section className="border-b border-[var(--color-border)] bg-[var(--color-bg-elevated)]">
+        <div className="page py-8 flex flex-col lg:flex-row lg:items-end lg:justify-between gap-6">
+          <div className="min-w-0">
+            <p className="flex flex-wrap items-center gap-2 text-[12.5px] text-[var(--color-ink-faint)]">
+              <span className="font-semibold uppercase tracking-[0.08em] text-[var(--color-brand)]">{reportKind(report)}</span>
+              <span>·</span>
+              <span>{formatDate(job.updated_at || job.created_at)}</span>
+            </p>
+            <h1 className="font-display mt-2 text-[28px] sm:text-[34px] leading-tight font-semibold text-[var(--color-ink)] max-w-[900px]">
+              {title}
+            </h1>
+            <div className="mt-4 flex flex-wrap gap-2">
               {tickers.map((t) => (
-                <div
+                <span
                   key={t}
-                  className="rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] shadow-[var(--shadow-card)] p-5"
+                  className="inline-flex items-center gap-2 rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1 text-[13px] text-[var(--color-ink)]"
                 >
-                  <CompanyReportCard ticker={t} report={report.reports[t]} />
-                </div>
+                  {nameFor(t)}
+                  <span className="mono text-[11.5px] text-[var(--color-ink-faint)]">{t}</span>
+                </span>
               ))}
             </div>
           </div>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <ShareMenu jobId={job.job_id} title={title} />
+            <DownloadPdfButton jobId={job.job_id} tickers={tickers} />
+            <button
+              onClick={onNewQuery}
+              className="inline-flex items-center gap-2 h-10 px-4 text-[13.5px] font-semibold rounded-[var(--radius-sm)] bg-[var(--color-brand)] text-[var(--color-on-brand)] hover:bg-[var(--color-brand-soft)] transition-colors cursor-pointer"
+            >
+              <PlusIcon className="h-4 w-4" />
+              New research
+            </button>
+          </div>
         </div>
-      )}
+      </section>
 
-      {!isNone && !isMulti && tickers.length > 0 && (
-        <div className="rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] shadow-[var(--shadow-card)] p-6 fade-up">
-          <CompanyReportCard ticker={tickers[0]} report={report.reports[tickers[0]]} heading={false} />
-        </div>
-      )}
+      <div className="page pt-8">
+        {isMulti && <Tabs tabs={tabs} value={tab} onChange={setTab} />}
 
-      {!isNone && (
-        <div className="mt-8 fade-up">
-          <FollowUpPanel jobId={job.job_id} onEscalate={onEscalate} />
-        </div>
-      )}
+        {isMulti && tab === "overview" ? (
+          report.portfolio ? (
+            <PortfolioSection portfolio={report.portfolio} visuals={visuals} tickers={tickers} />
+          ) : (
+            <ComparisonSection comparison={report.comparison} visuals={visuals} tickers={tickers} />
+          )
+        ) : (
+          <CompanyDashboard
+            key={tab}
+            ticker={tab}
+            report={report.reports[tab]}
+            pack={visuals?.companies?.[tab]}
+            chartsLoading={chartsLoading}
+          />
+        )}
+
+        <section className="mt-8 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)]">
+          <button
+            onClick={() => setShowMethod((v) => !v)}
+            aria-expanded={showMethod}
+            className="w-full flex items-center justify-between gap-3 px-5 py-4 text-left cursor-pointer"
+          >
+            <span>
+              <span className="block text-[14.5px] font-semibold text-[var(--color-ink)]">How this report was researched</span>
+              <span className="block text-[12.5px] text-[var(--color-ink-faint)]">Which sources were consulted for each company, and why</span>
+            </span>
+            <span className={`text-[var(--color-ink-faint)] transition-transform ${showMethod ? "rotate-180" : ""}`}>▾</span>
+          </button>
+          {showMethod && (
+            <div className="px-5 pb-5">
+              <RoutingPanel routing={report.routing} routingTrace={report.routing_trace} embedded />
+            </div>
+          )}
+        </section>
+
+        {visuals?.as_of && (
+          <p className="mt-4 text-[12px] text-[var(--color-ink-faint)]">
+            Market data as of {formatDate(visuals.as_of)}. For informational purposes only; not investment advice.
+          </p>
+        )}
+      </div>
+
+      <FollowUpDrawer jobId={job.job_id} onOpenJob={onOpenJob} />
     </div>
   );
 }

@@ -1,62 +1,53 @@
 import { useState } from "react";
-import { specialistLabel } from "../progress/StatusBadge";
+import { specialistLabel } from "../../lib/labels";
 
-const SOURCE_COLORS = {
-  market_data: "bg-[var(--color-brand-tint)] text-[var(--color-brand)]",
-  news_sentiment: "bg-[var(--color-info-tint)] text-[var(--color-info)]",
-  filings: "bg-[var(--color-accent-tint)] text-[var(--color-accent)]",
-};
+const COLLAPSED_COUNT = 4;
 
-function SourceTag({ source }) {
+function describeSource(source) {
   const key = source.split(/[\s(,]/)[0];
-  const cls = SOURCE_COLORS[key] || "bg-[var(--color-surface-sunken)] text-[var(--color-ink-muted)]";
-  return (
-    <span className={`text-[10.5px] px-1.5 py-0.5 rounded ${cls}`}>
-      {SOURCE_COLORS[key] ? specialistLabel(key) + source.slice(key.length) : source}
-    </span>
-  );
+  const label = specialistLabel(key);
+  const detail = source
+    .slice(key.length)
+    .replace(/^[\s,(]+|[\s)]+$/g, "")
+    .replace(/as_of\s*/i, "as of ")
+    .trim();
+  return detail ? `${label} · ${detail}` : label;
 }
 
 export default function SourcesPanel({ sourcesByClaim = {} }) {
-  const [open, setOpen] = useState(true);
+  const [expanded, setExpanded] = useState(false);
   const entries = Object.entries(sourcesByClaim);
-  if (entries.length === 0) return null;
+  if (!entries.length) return null;
+  const shown = expanded ? entries : entries.slice(0, COLLAPSED_COUNT);
 
   return (
-    <div>
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-2 mb-2.5 cursor-pointer group"
-      >
-        <h3 className="text-[13px] font-semibold uppercase tracking-wide text-[var(--color-ink)] group-hover:text-[var(--color-brand)]">
-          Sources &amp; claims
-        </h3>
-        <span className="text-[11px] text-[var(--color-ink-faint)]">
-          ({entries.length}) {open ? "▾" : "▸"}
-        </span>
-      </button>
-      {open && (
-        <ol className="space-y-2.5 fade-up">
-          {entries.map(([claim, meta], i) => (
-            <li key={i} className="text-[13px] leading-snug border-b border-[var(--color-border)] pb-2.5 last:border-b-0">
-              <div className="flex gap-2">
-                <span className="mono text-[11px] text-[var(--color-ink-faint)] shrink-0 mt-0.5">[{i + 1}]</span>
-                <div className="flex-1">
-                  <p className="text-[var(--color-ink)]">{claim}</p>
-                  <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
-                    {(meta.sources || []).map((s, j) => (
-                      <SourceTag key={j} source={s} />
-                    ))}
-                    {meta.caveat && (
-                      <span className="text-[11.5px] text-[var(--color-ink-faint)] italic">— {meta.caveat}</span>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </li>
-          ))}
-        </ol>
+    <section className="rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] p-5">
+      <header className="mb-3">
+        <h3 className="text-[14.5px] font-semibold text-[var(--color-ink)]">Evidence and sources</h3>
+        <p className="text-[12.5px] text-[var(--color-ink-faint)]">Every claim in the report and where it came from</p>
+      </header>
+      <ol className="divide-y divide-[var(--color-border)]">
+        {shown.map(([claim, meta], i) => (
+          <li key={i} className="flex gap-3 py-3">
+            <span className="mono text-[12px] text-[var(--color-ink-faint)] pt-0.5 w-6 shrink-0">{i + 1}.</span>
+            <div className="min-w-0">
+              <p className="text-[13.5px] text-[var(--color-ink)] leading-relaxed">{claim}</p>
+              <p className="mt-1 text-[12px] text-[var(--color-ink-faint)]">
+                {(meta.sources || []).map(describeSource).join("  ·  ") || "Unattributed"}
+              </p>
+              {meta.caveat && <p className="mt-1 text-[12px] text-[var(--color-ink-muted)]">{meta.caveat}</p>}
+            </div>
+          </li>
+        ))}
+      </ol>
+      {entries.length > COLLAPSED_COUNT && (
+        <button
+          onClick={() => setExpanded((v) => !v)}
+          className="mt-2 text-[13px] font-medium text-[var(--color-brand)] hover:text-[var(--color-brand-soft)] transition-colors cursor-pointer"
+        >
+          {expanded ? "Show fewer" : `Show all ${entries.length} sources`}
+        </button>
       )}
-    </div>
+    </section>
   );
 }
