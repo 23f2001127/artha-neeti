@@ -243,16 +243,19 @@ async def get_visuals(job_id: uuid.UUID) -> dict:
 
 @app.get("/research/{job_id}/report.pdf")
 async def get_report_pdf(job_id: uuid.UUID) -> Response:
-    """The finished report as a downloadable PDF - agents/report_pdf.py
-    renders the same report dict GET .../report returns into a document via
-    xhtml2pdf (pure Python, no system dependency - see app/README.md)."""
+    """The finished report as a downloadable PDF, charts included."""
     row = await asyncio.to_thread(db.get_job, str(job_id))
     if row is None:
         raise HTTPException(status_code=404, detail="job not found")
     if row["status"] not in ("done", "error") or row["report"] is None:
         raise HTTPException(status_code=409, detail=f"job is '{row['status']}', report not ready")
+    report = row["report"]
+    if row["status"] == "done" and not report.get("visuals"):
+        visuals = await jobs.ensure_visuals(str(job_id), row)
+        if visuals:
+            report = {**report, "visuals": visuals}
     try:
-        pdf_bytes = await asyncio.to_thread(render_report_pdf, row["report"])
+        pdf_bytes = await asyncio.to_thread(render_report_pdf, report)
     except Exception as exc:  # noqa: BLE001 - a rendering bug must not 500 opaquely
         log.exception("PDF render failed for job %s", job_id)
         raise HTTPException(status_code=500, detail=f"could not render PDF: {exc}") from exc
