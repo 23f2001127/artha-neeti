@@ -143,7 +143,7 @@ def root() -> dict:
         "docs": "/docs",
         "endpoints": [
             "POST /research", "GET /research/{job_id}", "GET /research/{job_id}/report",
-            "GET /research/{job_id}/report.pdf",
+            "GET /research/{job_id}/visuals", "GET /research/{job_id}/report.pdf",
             "POST /research/{job_id}/followups", "GET /research/{job_id}/followups",
             "POST /research/{job_id}/followups/escalate",
             "GET /companies", "POST /filings/upload", "POST /filings/fetch",
@@ -224,6 +224,21 @@ async def get_report(job_id: uuid.UUID) -> dict:
     if row["status"] not in ("done", "error") or row["report"] is None:
         raise HTTPException(status_code=409, detail=f"job is '{row['status']}', report not ready")
     return row["report"]
+
+
+@app.get("/research/{job_id}/visuals")
+async def get_visuals(job_id: uuid.UUID) -> dict:
+    """Chart data for a finished report: price history, KPIs, financial trends,
+    margins, sentiment and (for multi-company reports) a comparison block."""
+    row = await asyncio.to_thread(db.get_job, str(job_id))
+    if row is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    if row["status"] != "done" or not row["report"]:
+        raise HTTPException(status_code=409, detail=f"job is '{row['status']}', report not ready")
+    visuals = await jobs.ensure_visuals(str(job_id), row)
+    if not visuals:
+        raise HTTPException(status_code=404, detail="no chart data available for this report")
+    return visuals
 
 
 @app.get("/research/{job_id}/report.pdf")

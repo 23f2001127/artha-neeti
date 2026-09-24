@@ -419,3 +419,68 @@ def get_peer_comparison(tickers: list[str]) -> dict:
     if not companies:
         result["error"] = "None of the requested tickers returned usable data."
     return result
+
+
+def _statement_series(df, *names: str) -> dict[str, float]:
+    """``{period_end: value}`` for the first matching row, oldest first."""
+    if df is None or getattr(df, "empty", True):
+        return {}
+    for name in names:
+        if name in df.index:
+            try:
+                series = df.loc[name].dropna()
+            except (KeyError, ValueError, TypeError):
+                continue
+            if series.empty:
+                continue
+            out = {}
+            for period, value in series.items():
+                try:
+                    out[period.strftime("%Y-%m-%d")] = float(value)
+                except (AttributeError, ValueError, TypeError):
+                    continue
+            return dict(sorted(out.items()))
+    return {}
+
+
+def get_financial_trends(ticker: str) -> dict:
+    """Annual revenue, net income and margins for the reported fiscal years
+    (typically the last four), oldest first."""
+    try:
+        tk, info = _load(ticker)
+    except MarketDataError as exc:
+        return {"error": str(exc)}
+    try:
+        financials = tk.financials
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"Failed to load annual financials for '{normalize_ticker(ticker)}': {exc}"}
+
+    revenue = _statement_series(financials, "Total Revenue", "Operating Revenue")
+    net_income = _statement_series(financials, "Net Income", "Net Income Common Stockholders")
+    operating_income = _statement_series(financials, "Operating Income", "Total Operating Income As Reported")
+    periods = sorted(set(revenue) | set(net_income))
+    if not periods:
+        return {"error": f"No annual financials returned for '{normalize_ticker(ticker)}'."}
+
+    years = []
+    for period in periods:
+        rev = revenue.get(period)
+        ni = net_income.get(period)
+        op = operating_income.get(period)
+        years.append({
+            "period_end": period,
+            "revenue": rev,
+            "net_income": ni,
+            "operating_income": op,
+            "net_margin": _round(ni / rev, 4) if rev and ni is not None else None,
+            "operating_margin": _round(op / rev, 4) if rev and op is not None else None,
+        })
+
+    return {
+        "ticker": normalize_ticker(ticker),
+        "name": info.get("longName") or info.get("shortName"),
+        "currency": info.get("financialCurrency") or info.get("currency"),
+        "years": years,
+        "as_of": _now_utc_iso(),
+        "notes": "Annual figures from the company's reported statements; margins are fractions.",
+    }

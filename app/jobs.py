@@ -10,13 +10,37 @@ one agent at a time.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Callable
 
 from agents import planner
-from app import db
+from app import db, visuals
 
 log = logging.getLogger("arthaneeti.jobs")
+
+
+async def build_visuals(report: dict) -> dict | None:
+    """Chart data for a report. Never raises: charts are additive, a failure
+    here must not fail the research job."""
+    try:
+        return await asyncio.to_thread(visuals.build, report)
+    except Exception:  # noqa: BLE001
+        log.exception("visuals build failed")
+        return None
+
+
+async def ensure_visuals(job_id: str, row: dict) -> dict | None:
+    """Return the report's chart data, building and persisting it for reports
+    created before charts existed."""
+    report = row.get("report") or {}
+    if report.get("visuals"):
+        return report["visuals"]
+    built = await build_visuals(report)
+    if built:
+        report["visuals"] = built
+        await asyncio.to_thread(db.update_job, job_id, report=report)
+    return built
 
 
 def _progress_writer(job_id: str) -> Callable[[dict], None]:
@@ -70,6 +94,7 @@ async def run_job(job_id: str, query: str) -> None:
     if isinstance(result, dict) and "error" in result and "routing" not in result:
         db.update_job(job_id, status="error", error=str(result["error"]), report=result)
     else:
+        result["visuals"] = await build_visuals(result)
         db.update_job(
             job_id,
             status="done",

@@ -718,8 +718,41 @@ async def _portfolio_node(state: PlannerState) -> dict:
     }
 
 
+_SIGNAL_ARTICLE_KEYS = ("title", "url", "published_date", "label", "score", "mentions_company")
+
+
+def _extract_signals(state: PlannerState) -> dict:
+    """Structured sentiment per company, lifted from the news specialist's tool
+    results so the API can chart it without another LLM call."""
+    signals: dict = {}
+    for ticker, per in (state.get("specialist_outputs") or {}).items():
+        raw = ((per or {}).get("news_sentiment") or {}).get("raw_data") or {}
+        agg = next(
+            (r for r in raw.values() if isinstance(r, dict) and isinstance(r.get("breakdown"), dict)),
+            None,
+        )
+        if not agg:
+            continue
+        signals[ticker] = {
+            "sentiment": {
+                "overall": agg.get("overall"),
+                "breakdown": agg.get("breakdown"),
+                "breakdown_on_company": agg.get("breakdown_on_company"),
+                "article_count": agg.get("article_count"),
+                "articles": [
+                    {k: a.get(k) for k in _SIGNAL_ARTICLE_KEYS}
+                    for a in agg.get("articles") or []
+                    if isinstance(a, dict)
+                ],
+                "as_of": agg.get("as_of"),
+            }
+        }
+    return signals
+
+
 def _finalize_node(state: PlannerState) -> dict:
     final = {
+        "signals": _extract_signals(state),
         "query": state["query"],
         "mode": state.get("mode", "none"),
         "companies": state.get("companies", []),
