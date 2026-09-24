@@ -1,6 +1,7 @@
 import { motion } from "framer-motion";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Header from "../components/layout/Header";
+import Footer from "../components/layout/Footer";
 import LandingPage from "../features/landing/LandingPage";
 import QueryView from "../features/query/QueryView";
 import ProgressView from "../features/progress/ProgressView";
@@ -13,23 +14,26 @@ function jobIdFromUrl() {
   return new URLSearchParams(window.location.search).get("job");
 }
 
-// Enter-only (no `exit`/AnimatePresence): confirmed live that this framer-
-// motion/React 19 pairing never fires AnimatePresence's exit-complete
-// callback, which either permanently freezes the view (mode="wait") or
-// leaves the outgoing view's DOM stacked on top of the new one forever
-// (default mode) - a real, reproducible bug, not a config choice. Plain
-// key-based remount still unmounts the old view immediately and correctly;
-// it just skips an exit animation, which is a fine trade for correctness.
+// Enter-only transitions: AnimatePresence exit tracking is unreliable with this
+// framer-motion/React 19 pairing (leaves views stacked or frozen), and a keyed
+// remount already unmounts the previous view.
 const fade = {
-  initial: { opacity: 0, y: 8, scale: 0.99 },
-  animate: { opacity: 1, y: 0, scale: 1 },
+  initial: { opacity: 0, y: 8 },
+  animate: { opacity: 1, y: 0 },
   transition: { duration: 0.28, ease: "easeOut" },
 };
 
+function scrollToSection(id) {
+  requestAnimationFrame(() => {
+    const el = document.getElementById(id);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+}
+
 function AppShell() {
   const [jobId, setJobId] = useState(jobIdFromUrl);
-  // Skip the landing pitch when arriving on a direct/shared job link.
   const [screen, setScreen] = useState(() => (jobIdFromUrl() ? "app" : "landing"));
+  const pendingSection = useRef(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
   const { job, pollError } = useJobPolling(jobId);
@@ -40,6 +44,13 @@ function AppShell() {
     else url.searchParams.delete("job");
     window.history.replaceState({}, "", url);
   }, [jobId]);
+
+  useEffect(() => {
+    if (screen === "landing" && pendingSection.current) {
+      scrollToSection(pendingSection.current);
+      pendingSection.current = null;
+    }
+  }, [screen]);
 
   const handleSubmit = useCallback(async (query) => {
     setSubmitError(null);
@@ -57,31 +68,40 @@ function AppShell() {
   const goToQuery = useCallback(() => {
     setJobId(null);
     setScreen("app");
+    window.scrollTo({ top: 0 });
   }, []);
-  // A follow-up that needed fresh research already has its job created
-  // server-side (POST .../followups/escalate) - just switch to it, same as
-  // handleSubmit does after POST /research.
-  const onEscalate = useCallback((newJobId) => {
-    setJobId(newJobId);
-  }, []);
+
   const goToLanding = useCallback(() => {
     setJobId(null);
     setScreen("landing");
-  }, []);
-  // A gallery card on the landing page - same transition as opening a
-  // shared ?job= link, just triggered from a click instead of the URL.
-  const onViewJob = useCallback((viewJobId) => {
-    setJobId(viewJobId);
-    setScreen("app");
+    window.scrollTo({ top: 0 });
   }, []);
 
-  if (screen === "landing") {
-    return <LandingPage onLaunch={goToQuery} onViewJob={onViewJob} />;
-  }
+  const navigateTo = useCallback(
+    (sectionId) => {
+      if (screen === "landing") {
+        scrollToSection(sectionId);
+      } else {
+        setJobId(null);
+        setScreen("landing");
+        pendingSection.current = sectionId;
+      }
+    },
+    [screen],
+  );
+
+  const openJob = useCallback((viewJobId) => {
+    setJobId(viewJobId);
+    setScreen("app");
+    window.scrollTo({ top: 0 });
+  }, []);
 
   let content;
   let key;
-  if (!jobId) {
+  if (screen === "landing") {
+    key = "landing";
+    content = <LandingPage onStart={goToQuery} onViewJob={openJob} />;
+  } else if (!jobId) {
     key = "query";
     content = <QueryView onSubmit={handleSubmit} submitting={submitting} submitError={submitError} />;
   } else if (!job || job.status === "queued" || job.status === "running") {
@@ -89,17 +109,18 @@ function AppShell() {
     content = <ProgressView job={job} pollError={pollError} onNewQuery={goToQuery} />;
   } else {
     key = "report";
-    content = <ReportView job={job} onNewQuery={goToQuery} onEscalate={onEscalate} />;
+    content = <ReportView job={job} onNewQuery={goToQuery} onOpenJob={openJob} />;
   }
 
   return (
     <div className="min-h-screen flex flex-col bg-[var(--color-bg)]">
-      <Header onLogoClick={goToLanding} />
+      <Header onHome={goToLanding} onNavigate={navigateTo} onNewResearch={goToQuery} />
       <main className="flex-1 w-full">
         <motion.div key={key} {...fade}>
           {content}
         </motion.div>
       </main>
+      <Footer onNavigate={navigateTo} onNewResearch={goToQuery} />
     </div>
   );
 }

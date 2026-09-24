@@ -1,45 +1,52 @@
+import Logo from "./Logo";
 import ThemeToggle from "./ThemeToggle";
+import { GitHubIcon } from "../ui/icons";
+import { REPO_URL } from "../../lib/links";
 
-export default function Header({ onLogoClick }) {
+const NAV = [
+  { id: "how-it-works", label: "How it works" },
+  { id: "capabilities", label: "Capabilities" },
+  { id: "examples", label: "Example reports" },
+];
+
+export default function Header({ onHome, onNavigate, onNewResearch }) {
   return (
-    <header className="border-b border-[var(--color-border)] bg-[var(--color-surface)]">
-      <div className="mx-auto max-w-[1180px] px-6 py-4 flex items-center justify-between">
-        <button
-          onClick={onLogoClick}
-          className="flex items-center gap-3 group cursor-pointer"
-          title="Back to home"
-        >
-          <svg width="30" height="30" viewBox="0 0 32 32" className="shrink-0">
-            <rect width="32" height="32" rx="7" fill="var(--color-brand)" />
-            <path
-              d="M9 22.5 L15.5 9 L22.5 22.5"
-              stroke="var(--color-accent)"
-              strokeWidth="2.1"
-              fill="none"
-              strokeLinejoin="round"
-              strokeLinecap="round"
-            />
-            <path d="M11.6 17.3 H19.6" stroke="var(--color-accent)" strokeWidth="2.1" strokeLinecap="round" />
-          </svg>
-          <div className="text-left">
-            <div className="text-[15px] font-semibold tracking-tight text-[var(--color-ink)] leading-none group-hover:text-[var(--color-brand)] transition-colors">
-              ArthaNeeti
-            </div>
-            <div className="text-[11px] text-[var(--color-ink-faint)] leading-none mt-1">
-              Indian equity research, multi-agent
-            </div>
-          </div>
+    <header className="sticky top-0 z-40 w-full border-b border-[var(--color-border)] bg-[var(--color-bg)]/85 backdrop-blur-md">
+      <div className="page flex h-16 items-center justify-between gap-6">
+        <button onClick={onHome} className="cursor-pointer" aria-label="ArthaNeeti home">
+          <Logo />
         </button>
-        <div className="flex items-center gap-4">
+
+        <nav className="hidden md:flex items-center gap-1" aria-label="Primary">
+          {NAV.map((item) => (
+            <button
+              key={item.id}
+              onClick={() => onNavigate(item.id)}
+              className="px-3 py-2 text-[13.5px] text-[var(--color-ink-muted)] hover:text-[var(--color-ink)] rounded-[var(--radius-sm)] transition-colors cursor-pointer"
+            >
+              {item.label}
+            </button>
+          ))}
+        </nav>
+
+        <div className="flex items-center gap-2">
           <a
-            href="https://github.com/23f2001127/artha-neeti"
+            href={REPO_URL}
             target="_blank"
             rel="noreferrer"
-            className="hidden sm:inline text-[12px] text-[var(--color-ink-muted)] hover:text-[var(--color-brand)] transition-colors"
+            aria-label="View source on GitHub"
+            className="hidden sm:inline-flex h-9 w-9 items-center justify-center rounded-full text-[var(--color-ink-muted)] hover:text-[var(--color-ink)] hover:bg-[var(--color-surface-muted)] transition-colors"
           >
-            Source ↗
+            <GitHubIcon className="h-[18px] w-[18px]" />
           </a>
           <ThemeToggle />
+          <button
+            onClick={onNewResearch}
+            className="ml-1 h-9 px-4 text-[13.5px] font-semibold rounded-[var(--radius-sm)] bg-[var(--color-brand)] text-[var(--color-on-brand)]
+                       hover:bg-[var(--color-brand-soft)] transition-colors cursor-pointer"
+          >
+            New research
+          </button>
         </div>
       </div>
     </header>
