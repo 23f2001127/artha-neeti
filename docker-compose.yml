@@ -1,0 +1,53 @@
+# Full ArthaNeeti stack.
+#
+#   docker compose up --build              API + web app, database from .env
+#   docker compose --profile local-db up   also runs Postgres + pgvector locally
+#
+# The web app is served on http://localhost:8080 and proxies /api to the API.
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    env_file: .env
+    environment:
+      PORT: "8000"
+    ports:
+      - "8000:8000"
+    volumes:
+      - uploads:/app/data/uploads
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # Optional local database. Point DATABASE_URL in .env at
+  # postgresql://arthaneeti:arthaneeti@db:5432/arthaneeti to use it; the API
+  # creates its tables on startup. Annual reports must then be ingested again.
+  db:
+    image: pgvector/pgvector:pg17
+    profiles: ["local-db"]
+    environment:
+      POSTGRES_USER: arthaneeti
+      POSTGRES_PASSWORD: arthaneeti
+      POSTGRES_DB: arthaneeti
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U arthaneeti"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  uploads:
+  pgdata:
