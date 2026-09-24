@@ -80,7 +80,7 @@ def _check_ip_throttle(request: Request) -> None:
     while hits and now - hits[0] > _THROTTLE_WINDOW_S:
         hits.popleft()
     if len(hits) >= _THROTTLE_MAX_PER_WINDOW:
-        raise HTTPException(status_code=429, detail="Too many requests - please slow down and try again shortly.")
+        raise HTTPException(status_code=429, detail="Too many requests. Please wait a moment and try again.")
     hits.append(now)
 
 
@@ -215,7 +215,7 @@ async def get_report_pdf(job_id: uuid.UUID) -> Response:
         pdf_bytes = await asyncio.to_thread(render_report_pdf, report)
     except Exception as exc:  # noqa: BLE001
         log.exception("PDF render failed for job %s", job_id)
-        raise HTTPException(status_code=500, detail=f"could not render PDF: {exc}") from exc
+        raise HTTPException(status_code=500, detail="The PDF could not be generated. Please try again.") from exc
 
     tickers = list((row["report"].get("reports") or {}).keys())
     slug = "-".join(t.lower() for t in tickers) or "report"

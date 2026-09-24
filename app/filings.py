@@ -37,10 +37,22 @@ def normalize_ticker(raw: str) -> str:
     return t
 
 
+QUOTA_MESSAGE = (
+    "Today's indexing limit was reached before this report finished. "
+    "Please try again tomorrow; indexing will start from the beginning."
+)
+FAILED_MESSAGE = "This annual report couldn't be added. Please try again."
+NO_TEXT_MESSAGE = "This PDF has no readable text; it may be a scanned document."
+NOT_FOUND_MESSAGE = (
+    "We couldn't find a verifiable annual report for this company online. "
+    "Try uploading the PDF instead."
+)
+
+
 def _validate_ticker(ticker: str) -> str:
     norm = normalize_ticker(ticker)
     if not norm or not re.fullmatch(r"[A-Z0-9&.\-]{1,20}", norm):
-        raise UploadError("ticker looks invalid - use the NSE-style symbol, e.g. RELIANCE, M&M.")
+        raise UploadError("Enter the company's NSE symbol, for example RELIANCE or M&M.")
     return norm
 
 
@@ -48,11 +60,11 @@ def validate_upload(filename: str, size: int, ticker: str) -> str:
     """Raises UploadError with a client-facing message, or returns the
     normalized ticker."""
     if not filename.lower().endswith(".pdf"):
-        raise UploadError("only PDF files are accepted.")
+        raise UploadError("Only PDF files can be added.")
     if size <= 0:
-        raise UploadError("the uploaded file is empty.")
+        raise UploadError("The file is empty.")
     if size > MAX_UPLOAD_BYTES:
-        raise UploadError(f"file is {size / 1e6:.1f}MB - the limit is {MAX_UPLOAD_BYTES / 1e6:.0f}MB.")
+        raise UploadError(f"The file is {size / 1e6:.1f} MB; the limit is {MAX_UPLOAD_BYTES / 1e6:.0f} MB.")
     return _validate_ticker(ticker)
 
 
@@ -93,24 +105,19 @@ async def _ingest_and_finish(
         )
 
     try:
-        db.update_upload_job(job_id, status="running", detail="parsing and embedding the PDF...")
+        db.update_upload_job(job_id, status="running", detail="Reading and indexing the report…")
         result = await asyncio.to_thread(do_ingest)
     except EmbeddingQuotaError as exc:
         log.warning("filing job %s stopped on embedding quota: %s", job_id, exc)
-        db.update_upload_job(
-            job_id, status="error",
-            error=f"Daily embedding quota reached partway through: {exc}. "
-                  f"Try again after the quota resets - it restarts this file "
-                  f"from the beginning (partial embeddings aren't kept).",
-        )
+        db.update_upload_job(job_id, status="error", error=QUOTA_MESSAGE)
         return
     except BaseException as exc:  # noqa: BLE001 - last line for this job
         log.exception("filing job %s crashed", job_id)
-        db.update_upload_job(job_id, status="error", error=f"{type(exc).__name__}: {exc}")
+        db.update_upload_job(job_id, status="error", error=FAILED_MESSAGE)
         return
 
     if result.get("skipped"):
-        db.update_upload_job(job_id, status="error", error="no extractable text found in this PDF.")
+        db.update_upload_job(job_id, status="error", error=NO_TEXT_MESSAGE)
         return
 
     db.update_upload_job(job_id, status="done", chunks=result["chunks"], chunks_done=result["chunks"])
@@ -131,17 +138,17 @@ async def run_fetch_job(job_id: str, *, ticker: str, company: str | None, fiscal
         return fetch_filing_pdf(company or ticker, fiscal_year, max_bytes=MAX_UPLOAD_BYTES)
 
     try:
-        db.update_upload_job(job_id, status="running", detail="searching the web for a PDF...")
+        db.update_upload_job(job_id, status="running", detail="Searching for the annual report…")
         content, hit = await asyncio.to_thread(do_fetch)
     except FetchError as exc:
         log.info("fetch job %s: %s", job_id, exc)
-        db.update_upload_job(job_id, status="error", error=str(exc))
+        db.update_upload_job(job_id, status="error", error=NOT_FOUND_MESSAGE)
         return
     except BaseException as exc:  # noqa: BLE001 - last line for this job
         log.exception("fetch job %s crashed while searching/downloading", job_id)
-        db.update_upload_job(job_id, status="error", error=f"{type(exc).__name__}: {exc}")
+        db.update_upload_job(job_id, status="error", error=NOT_FOUND_MESSAGE)
         return
 
-    db.update_upload_job(job_id, source_url=hit["url"], detail=f"downloaded from {hit['url']}")
+    db.update_upload_job(job_id, source_url=hit["url"], detail="Found the report. Indexing it…")
     pdf_path = await asyncio.to_thread(_save_pdf, content, job_id, ticker, "FETCH")
     await _ingest_and_finish(job_id, pdf_path, ticker=ticker, company=company, fiscal_year=fiscal_year)
