@@ -1,8 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { getCompanies } from "../../lib/api";
 import { detectFullCoverageMatch } from "../../lib/coverage";
+import { ArrowRightIcon } from "../../components/ui/icons";
 import CoverageStrip from "./CoverageStrip";
 import ExampleChips from "./ExampleChips";
+
+const INCLUDED = [
+  "Share price, valuation and profitability charts",
+  "News sentiment across recent coverage",
+  "Annual-report analysis with page citations",
+  "Flagged conflicts between sources",
+  "Shareable link and PDF export",
+];
 
 export default function QueryView({ onSubmit, submitting, submitError }) {
   const [query, setQuery] = useState("");
@@ -19,10 +28,7 @@ export default function QueryView({ onSubmit, submitting, submitError }) {
   useEffect(() => {
     let cancelled = false;
     getCompanies()
-      .then((data) => {
-        if (cancelled) return;
-        setCompanies(data.full_coverage?.companies || []);
-      })
+      .then((data) => !cancelled && setCompanies(data.full_coverage?.companies || []))
       .catch((err) => !cancelled && setCompaniesError(err.message))
       .finally(() => !cancelled && setCompaniesLoading(false));
     return () => {
@@ -35,87 +41,91 @@ export default function QueryView({ onSubmit, submitting, submitError }) {
   function handleSubmit(e) {
     e.preventDefault();
     const q = query.trim();
-    if (!q || submitting) return;
-    onSubmit(q);
+    if (q && !submitting) onSubmit(q);
   }
 
   return (
-    <div className="mx-auto max-w-[720px] px-6 pt-16 pb-20">
-      <div className="fade-up">
-        <h1 className="text-[26px] font-semibold tracking-tight text-[var(--color-ink)] mb-2">
-          Ask a research question
+    <div className="page py-12 grid grid-cols-1 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)] gap-8 items-start">
+      <div className="min-w-0 fade-up">
+        <p className="text-[12.5px] font-semibold uppercase tracking-[0.1em] text-[var(--color-brand)]">New research report</p>
+        <h1 className="font-display mt-3 text-[34px] sm:text-[42px] leading-tight font-semibold text-[var(--color-ink)]">
+          What would you like to research?
         </h1>
-        <p className="text-[14.5px] text-[var(--color-ink-muted)] leading-relaxed mb-8 max-w-[560px]">
-          A planner routes your question to the specialists it actually needs — market data, news
-          &amp; sentiment, filings analysis — then reconciles what they find into one cited report.
-          Runs take a few minutes; you'll watch it work.
+        <p className="mt-3 max-w-[640px] text-[15.5px] leading-relaxed text-[var(--color-ink-muted)]">
+          Ask about a single company, compare several, or describe a portfolio you hold. Reports take a few minutes to
+          prepare.
         </p>
-      </div>
 
-      <form onSubmit={handleSubmit} className="fade-up" style={{ animationDelay: "60ms" }}>
-        <div className="rounded-[var(--radius-lg)] border border-[var(--color-border-strong)] bg-[var(--color-surface)] shadow-[var(--shadow-card)] focus-within:border-[var(--color-brand-soft)] transition-colors">
-          <textarea
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="e.g. Give me a complete research view on TCS"
-            rows={3}
-            disabled={submitting}
-            className="w-full resize-none bg-transparent px-4 pt-4 pb-2 text-[15px] text-[var(--color-ink)]
-                       placeholder:text-[var(--color-ink-faint)] outline-none disabled:opacity-60"
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleSubmit(e);
-            }}
-          />
-          <div className="flex items-center justify-between px-4 pb-3">
-            <span className="text-[11.5px] text-[var(--color-ink-faint)]">⌘/Ctrl + Enter to submit</span>
-            <button
-              type="submit"
-              disabled={!query.trim() || submitting}
-              className="text-[13.5px] font-medium px-4 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-brand)]
-                         text-[var(--color-bg)] hover:bg-[var(--color-brand-soft)] transition-colors
-                         disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-            >
-              {submitting ? "Submitting…" : "Run research"}
-            </button>
+        <form onSubmit={handleSubmit} className="mt-8">
+          <div className="rounded-[var(--radius-lg)] border border-[var(--color-border-strong)] bg-[var(--color-surface)] shadow-[var(--shadow-card)] focus-within:border-[var(--color-brand)] transition-colors">
+            <textarea
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="e.g. Give me a complete research view on TCS"
+              rows={4}
+              disabled={submitting}
+              aria-label="Research question"
+              className="w-full resize-none bg-transparent px-5 pt-5 pb-2 text-[16px] leading-relaxed text-[var(--color-ink)] placeholder:text-[var(--color-ink-faint)] outline-none disabled:opacity-60"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleSubmit(e);
+              }}
+            />
+            <div className="flex items-center justify-between gap-3 px-5 pb-4">
+              <span className="hidden sm:inline text-[12.5px] text-[var(--color-ink-faint)]">Ctrl + Enter to submit</span>
+              <button
+                type="submit"
+                disabled={!query.trim() || submitting}
+                className="ml-auto inline-flex items-center gap-2 h-11 px-5 text-[14.5px] font-semibold rounded-[var(--radius-md)] bg-[var(--color-brand)] text-[var(--color-on-brand)] hover:bg-[var(--color-brand-soft)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+              >
+                {submitting ? "Starting…" : "Generate report"}
+                {!submitting && <ArrowRightIcon className="h-4 w-4" />}
+              </button>
+            </div>
           </div>
-        </div>
 
-        <div className="min-h-[26px] mt-2 px-1">
-          {query.trim() && match && (
-            <p className="text-[12.5px] text-[var(--color-ok)] flex items-center gap-1.5">
-              <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-ok)]" />
-              Full coverage detected for <span className="mono font-medium">{match.ticker}</span> — all three
-              specialists are available.
+          <div className="min-h-[28px] mt-3 px-1">
+            {query.trim() && match && (
+              <p className="flex items-center gap-2 text-[13px] text-[var(--color-ink-muted)]">
+                <span className="h-2 w-2 rounded-full bg-[var(--color-ok)]" />
+                Full coverage for {match.name || match.ticker}: market data, news and annual-report analysis.
+              </p>
+            )}
+            {query.trim() && !match && !companiesLoading && (
+              <p className="flex items-center gap-2 text-[13px] text-[var(--color-ink-muted)]">
+                <span className="h-2 w-2 rounded-full bg-[var(--color-skip)]" />
+                Market data and news cover every NSE company. Annual-report analysis is limited to the companies listed on the right.
+              </p>
+            )}
+          </div>
+
+          {submitError && (
+            <p className="mt-2 rounded-[var(--radius-md)] bg-[var(--color-error-tint)] px-4 py-3 text-[13.5px] text-[var(--color-ink)]">
+              {submitError}
             </p>
           )}
-          {query.trim() && !match && !companiesLoading && (
-            <p className="text-[12.5px] text-[var(--color-running)] flex items-center gap-1.5">
-              <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-running)]" />
-              No fully-covered company recognized in this query. If it's about a company outside the
-              coverage list below, you'll get market data + news, but not filings analysis.
-            </p>
-          )}
+        </form>
+
+        <div className="mt-8">
+          <p className="text-[13px] font-medium text-[var(--color-ink-faint)] mb-3">Try one of these</p>
+          <ExampleChips onPick={setQuery} disabled={submitting} />
         </div>
 
-        {submitError && (
-          <p className="text-[13px] text-[var(--color-error)] bg-[var(--color-error-tint)] rounded-[var(--radius-sm)] px-3 py-2 mt-1">
-            {submitError}
-          </p>
-        )}
-      </form>
-
-      <div className="mt-6 fade-up" style={{ animationDelay: "120ms" }}>
-        <ExampleChips onPick={setQuery} disabled={submitting} />
+        <div className="mt-10 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] p-5">
+          <p className="text-[14px] font-semibold text-[var(--color-ink)] mb-3">Every report includes</p>
+          <ul className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2">
+            {INCLUDED.map((item) => (
+              <li key={item} className="flex items-start gap-2.5 text-[13.5px] text-[var(--color-ink-muted)]">
+                <span className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--color-brand)]" />
+                {item}
+              </li>
+            ))}
+          </ul>
+        </div>
       </div>
 
-      <div className="mt-10 fade-up" style={{ animationDelay: "180ms" }}>
-        <CoverageStrip
-          companies={companies}
-          loading={companiesLoading}
-          error={companiesError}
-          onUploaded={refreshCompanies}
-        />
-      </div>
+      <aside className="min-w-0 fade-up" style={{ animationDelay: "80ms" }}>
+        <CoverageStrip companies={companies} loading={companiesLoading} error={companiesError} onUploaded={refreshCompanies} />
+      </aside>
     </div>
   );
 }
