@@ -1,26 +1,17 @@
-"""Best-effort web search + download for an ad-hoc annual-report PDF.
+"""Finds and downloads a company's annual-report PDF from web search results.
 
-This is the "auto-fetch" alternative to a manual upload (see ``app/filings.py``
-/ ``POST /filings/fetch``): given a company name, search the web for a
-directly-downloadable PDF of its annual report and fetch it, then hand the
-bytes to the exact same ``ingest_file()`` pipeline an upload uses.
+Used by ``POST /filings/fetch`` as an alternative to uploading; the downloaded
+bytes go through the same ``ingest_file()`` pipeline as an upload.
 
-Honest scope - this is deliberately simple, not a scraper:
-- It does **not** crawl HTML pages looking for an embedded PDF link. Many
-  search hits are an investor-relations *index* page, not the report itself;
-  those are skipped rather than followed, to avoid the fragility of scraping
-  arbitrary company sites. Only a search result whose URL itself ends in
-  ``.pdf`` counts as a candidate.
-- If nothing in the top results is a direct PDF link, this fails with
-  ``FetchError`` - the caller (``app/filings.py``) surfaces that as a clear
-  "couldn't find one automatically, try uploading it yourself" message. A
-  miss here is an expected outcome, not a bug.
+- Only search results whose URL is itself a PDF are considered. Investor
+  relations index pages are skipped rather than scraped.
+- Candidates are ranked by title and URL, then each download is checked for the
+  company's own name and corporate suffix on its first pages, which rejects
+  subsidiaries' reports.
+- When nothing qualifies, ``FetchError`` is raised and the client is told to
+  upload the report instead.
 
-External services: **Tavily** (``TAVILY_API_KEY``) - the same web-search
-service ``research_mcp`` uses for news, kept as its own small client here (not
-imported from research_mcp) so the two MCP servers stay independent - the same
-rationale as this package's own ``config.COMPANY_NAMES`` being a local copy
-rather than a shared import.
+Uses its own small Tavily client so the MCP servers stay independent.
 """
 
 from __future__ import annotations

@@ -1,5 +1,5 @@
-// In development requests go through the Vite proxy at /api; production builds
-// call the deployed API directly via VITE_API_BASE_DIRECT.
+// Requests go to /api, proxied by Vite in development and by nginx in the
+// container image. VITE_API_BASE_DIRECT points a build at an API on another origin.
 const BASE = import.meta.env.VITE_API_BASE_DIRECT || "/api";
 
 const UNREACHABLE = "We couldn't reach the ArthaNeeti service. Check your connection and try again.";

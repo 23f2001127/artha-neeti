@@ -23,7 +23,7 @@ EMBED_DIM = int(os.environ.get("FILINGS_EMBED_DIM", "768"))
 
 # Rate limiting (per-minute tokens/requests + the 1,000/day embedding cap) is
 # owned by shared/llm_rate_limiter.py - a CROSS-PROCESS limiter, so ingestion,
-# the live server, and future agents share one view of the account quota. Tune it
+# the live server and the agents share one view of the account quota. Tune it
 # via LLM_RL_EMBED_RPM / _TPM / _RPD (see that module's docstring).
 #
 # EMBED_BATCH_TOKENS only controls how many chunk texts go in one embed_content

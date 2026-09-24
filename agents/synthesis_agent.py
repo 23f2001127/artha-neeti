@@ -1,51 +1,15 @@
-"""Synthesis Agent - merges the three specialists' outputs into one cited report.
+"""Synthesis agent: merges the specialists' outputs into one cited report.
 
-What it is
-----------
-The fourth and last agent of the specialist layer, and the odd one out: it does
-NOT wrap an MCP server and does NOT run a ReAct loop. It is handed the finished
-structured outputs of the Market Data, News & Sentiment and Filings agents (the
-dicts their ``run`` / ``run_sync`` return) and reconciles them into the report a
-user of ArthaNeeti actually reads.
+Unlike the specialists it has no MCP server or ReAct loop; it takes their
+finished outputs and makes one structured-output call:
 
-    synthesize(query, {"market_data": <out>, "news_sentiment": <out>, "filings": <out>}) -> dict
+    synthesize(query, {"market_data": out, "news_sentiment": out, "filings": out}) -> dict
 
-The Planner will call this directly once it has gathered the specialist outputs
-itself. Synthesis' job is purely to reconcile and report - never to decide what
-to fetch - so the interface takes already-gathered outputs and nothing else.
-
-How much of ``_base.py`` applies
---------------------------------
-``_base.run_agent`` is a driver for *MCP + ReAct* agents: spawn the server
-subprocess, bridge its tools, run ``create_react_agent``, then synthesise. This
-agent has no server and no tools, so that whole path (the stdio client,
-``load_mcp_tools``, the ReAct loop, ``extract_trace``) is dead weight here.
-
-What genuinely transfers, and is reused directly:
-- ``_base.make_model`` - the ``RateLimitedChatGroq`` with the model-fallback chain
-  and the shared cross-process limiter. No new LLM/limiter code.
-- ``_base.flatten_exc`` + ``rl.QuotaExceededError`` - the same error unwrapping and
-  quota classification the other agents' failure paths use.
-- the ``model.with_structured_output(...).ainvoke(...)`` + one retry-guard pattern
-  that every other agent's ``_synthesize`` already uses.
-
-So this module is just: ``make_model`` + one structured synthesis call + a thin
-driver of its own (~ the same size as the other agents' ``_synthesize`` helper,
-promoted to the public entry point).
-
-The problem this agent owns
----------------------------
-Reconciling signals that point different ways - strong fundamentals vs negative
-sentiment, a filing risk that recent news is or isn't echoing, a metric two
-specialists state differently (often because they are different fiscal years:
-yfinance ~FY2026 vs an FY2024-25 annual report). It must SURFACE that tension in
-``conflicts_flagged`` and judge whether it is a real contradiction or just
-different lenses - not average it into a bland middle.
-
-And the carry-through, harder than before: each specialist already hedged its
-findings. When the report repeats a claim it attaches the STRONGEST upstream
-hedge that applied - it does not launder a careful finding into a confident one -
-and it names which specialist(s) the claim came from (``sources_by_claim``).
+The report surfaces disagreement between sources in ``conflicts_flagged`` (and
+judges whether it is a contradiction or a difference of lens, such as different
+fiscal years), carries each claim's strongest upstream caveat, and attributes
+every claim to its sources in ``sources_by_claim``. Missing or failed
+specialists are reported in ``unavailable`` rather than guessed around.
 """
 
 from __future__ import annotations

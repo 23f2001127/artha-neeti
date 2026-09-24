@@ -1,34 +1,14 @@
-"""News & Sentiment Agent - a standalone LangGraph specialist over research-mcp.
+"""News and sentiment agent: recent coverage, sentiment and announcements
+through research-mcp.
 
-What it is
-----------
-Given a natural-language question about recent news, market sentiment, or
-corporate announcements for an Indian-listed company, this agent picks the right
-``research-mcp`` tool(s), calls them, and returns a structured result for a
-downstream Synthesis Agent plus a human summary.
+- Company sentiment uses the aggregate mode of ``get_sentiment``; the headline
+  figure is ``breakdown_on_company`` (articles actually about the company), and
+  ``score`` is the model's self-reported confidence, not a probability.
+- ``get_corporate_announcements`` is a news search, not the exchange feed; its
+  disclaimer is carried into the caveats.
+- Articles flagged ``mentions_company=false`` may concern a group company or
+  peer, and relying on them is noted.
 
-Shared machinery (MCP stdio client, Groq ``create_react_agent`` through
-``shared/llm_rate_limiter.py``, model-fallback chain, trace extraction) is in
-``agents/_base.py`` - the same pattern as ``market_data_agent.py``.
-
-The hard part: research-mcp's tools carry real caveats, and this agent must NOT
-smooth them into false confidence:
-
-- **get_sentiment** has two modes. For a "sentiment on <company>" question the
-  agent passes a ticker so the tool runs AGGREGATE mode over recent news. The
-  trustworthy headline is ``overall.label`` + **``breakdown_on_company``** over the
-  on-company articles - the raw ``breakdown`` also counts off-entity items and is
-  inflated (this matches research-mcp's own README). ``score`` is the model's
-  self-reported confidence, not a calibrated probability.
-- **get_corporate_announcements** is a keyword-scoped Tavily news search, **NOT**
-  the NSE/BSE official feed. Its ``disclaimer`` string is carried verbatim into
-  ``caveats``. Findings lead with ``likely_announcement=true`` items; anything
-  cited from the unflagged tail is labelled lower-confidence with the reason.
-- **get_company_news** items flagged ``mentions_company=false`` may be about a
-  group company / peer; relying on them is noted.
-
-Standalone use
---------------
     from agents.news_sentiment_agent import run_sync
     result = run_sync("what's the market sentiment on TCS right now")
 """

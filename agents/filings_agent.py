@@ -1,38 +1,16 @@
-"""Filings Agent - a standalone LangGraph specialist over filings-rag-mcp.
+"""Filings agent: answers questions from a company's annual report through
+filings-rag-mcp, with page citations.
 
-What it is
-----------
-Given a question about what an Indian-listed company disclosed in its OWN annual
-report, this agent picks the right ``filings-rag-mcp`` tool, retrieves cited
-chunks from the PDF, and returns a structured, page-cited result for a downstream
-Synthesis Agent plus a human summary.
+- Every finding carries the company, fiscal year and page number(s).
+- Chunks flagged ``may_contain_tabular_data`` come from tables that PDF
+  extraction flattened; their figures are reported as approximate.
+- ``compare_yoy_metrics`` compares the current and prior-year columns of one
+  report, not separate years' filings; multi-year trends are declined plainly.
+- Standalone and consolidated figures are labelled and never blended.
 
-Shared machinery (MCP stdio client, Groq ``create_react_agent`` through
-``shared/llm_rate_limiter.py``, model-fallback chain, trace extraction) is in
-``agents/_base.py`` - same pattern as ``market_data_agent.py`` /
-``news_sentiment_agent.py``.
+Retrieved chunks are trimmed before they reach the model (``_compact``); full
+text stays in ``raw_data`` for citation.
 
-The hard parts, matching filings-rag-mcp's own honest documentation:
-
-- **Page citations are the point.** Every finding taken from a filing must carry
-  the company, the fiscal year, and the specific page number(s). No un-cited
-  claims from filing data.
-- **``may_contain_tabular_data``** - a flagged chunk is a statement table that PDF
-  extraction flattened into run-on text; its numbers may be collapsed/misaligned.
-  The agent hedges those figures ("approximately", "as read from the flattened
-  table on p.X"), it does not restate them with false precision.
-- **``compare_yoy_metrics`` is single-filing scope** - the current + prior-year
-  columns the ONE report itself discloses, not a trend across separate years'
-  filings (ArthaNeeti holds one annual report per company). If the question wants
-  a real multi-year trend, the agent says that plainly.
-- **standalone vs consolidated** - ``get_financial_statement_section`` can return
-  both; the agent flags which one a number is from, and does not blend them.
-
-Large RAG payloads are trimmed before they hit the reasoning/synthesis models
-(``_compact``); full chunk text stays in ``raw_data`` for citation.
-
-Standalone use
---------------
     from agents.filings_agent import run_sync
     result = run_sync("what are Reliance's key disclosed risks")
 """

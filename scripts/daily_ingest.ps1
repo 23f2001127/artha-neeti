@@ -1,23 +1,12 @@
 <#
-    daily_ingest.ps1 - resume filings-rag-mcp ingestion once per day.
+    Resumes annual-report ingestion; meant to run once a day.
 
-    Why this exists
-    ---------------
-    The annual-report ingestion (mcp_servers/filings_rag_mcp/ingest.py) embeds
-    chunks through Gemini's free tier, which caps at ~1,000 embeddings/day. One
-    run gets through ~1-2 filings before hitting the daily wall and stopping
-    cleanly (exit code 2). ingest.py is idempotent and resumable - a finished
-    filing is skipped, a half-done one is redone - so re-running it once a day
-    grinds through the remaining corpus over several days with no babysitting.
+    Gemini's free tier allows about 1,000 embeddings a day, roughly one or two
+    reports. ingest.py skips finished reports and redoes partial ones, so a
+    daily run works through the corpus unattended. Output is appended to
+    logs/ingest_<date>.log. Scheduling is described in
+    mcp_servers/filings_rag_mcp/README.md.
 
-    This script just: cd to the repo, run the ingest module with the project's
-    venv Python, and append everything (stdout + stderr) to a dated log.
-
-    It is registered with Windows Task Scheduler - see the "Task Scheduler setup"
-    section in mcp_servers/filings_rag_mcp/README.md for the exact task name,
-    trigger and how to disable it once ingestion is complete.
-
-    Run manually the same way the scheduler does:
         powershell -NoProfile -ExecutionPolicy Bypass -File scripts\daily_ingest.ps1
 #>
 

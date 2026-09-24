@@ -1,10 +1,8 @@
-"""Conversational follow-ups on top of a finished research job.
+"""Follow-up questions on a finished research job.
 
-``ask`` is the cheap path: one synchronous LLM call (agents.followup_agent),
-answered within the request. ``escalate`` just creates the new job row - the
-same asyncio.create_task + app.jobs.run_job dispatch POST /research already
-does lives in app/main.py, so the escalation endpoint is a one-line variation
-of the existing submit-research handler, not a new pattern.
+``ask`` answers synchronously with one LLM call. ``create_escalation_job``
+creates the row for a new research run that continues the conversation;
+app/main.py starts it the same way as POST /research.
 """
 
 from __future__ import annotations

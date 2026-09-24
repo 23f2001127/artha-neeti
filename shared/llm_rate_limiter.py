@@ -1,78 +1,38 @@
-"""Cross-process rate limiter for the shared LLM-provider account quotas.
+"""Cross-process rate limiter for the shared LLM provider quotas.
 
-Why this module exists
-----------------------
-ArthaNeeti's components call a handful of hosted LLM APIs with **one API key
-each**, so every component shares one account-wide quota per provider:
+Each provider is used with one API key, so the API process, the MCP server
+subprocesses and any scripts all draw on the same account quota. Every request
+reserves a row in a local SQLite ledger (WAL mode) inside an IMMEDIATE
+transaction, which serializes the check across processes; ``acquire`` either
+records the reservation or sleeps until the sliding window frees up. SQLite is
+local, stdlib and sub-millisecond, unlike a round trip to the remote database.
+The ledger must be on a local filesystem: ``<repo>/.llm_rate_limiter.db`` by
+default, or ``LLM_RATE_LIMITER_DB``.
 
-- **Gemini embeddings** - `filings_rag_mcp` (`embed_content`)
-- **Gemini generation** - `research_mcp` sentiment (`generate_content`)
-- **Groq generation** - the LangGraph agents' reasoning / tool-selection loops
+Buckets (free tier limits; providers change these):
 
-Each process's own in-memory throttle can't see the others; run two at once and
-they blow the limit together (it nearly happened with Gemini's 20/day generate
-cap). This module is the shared meeting point for all of them.
-
-Design choice: a local SQLite ledger
-------------------------------------
-Every request reserves a row `(bucket, timestamp, tokens, requests)`. `acquire()`
-opens the DB in an ``IMMEDIATE`` transaction (a cross-process write lock),
-evaluates the sliding per-minute and per-day windows against that ledger, and
-either records the reservation and returns, or releases the lock and sleeps until
-the window frees up.
-
-Alternatives considered and rejected for a **local, single-machine, solo** setup:
-
-- *in-memory limiter* - can't see other processes (the whole problem).
-- *Postgres* (we hold a connection) - it's a **remote** Supabase instance:
-  ~50-150 ms per rate check, and it couples `research_mcp` (which otherwise needs
-  no database) to the DB. A rate check should be local and near-free.
-- *a gateway daemon* every caller proxies through - correct at scale, but adds a
-  long-running process to supervise, startup ordering, and an IPC layer. Too much
-  machinery for one dev laptop.
-- *a JSON file + advisory locks* - SQLite already does atomic cross-process
-  read-modify-write, portably (Windows + POSIX), with WAL. Hand-rolling it is more
-  code and more bugs.
-
-SQLite in WAL mode on local disk gives genuine multi-process coordination with
-sub-millisecond checks and **zero new dependencies** (`sqlite3` is stdlib).
-Requirement: DB file on a local filesystem (not NFS/SMB). Path:
-``<repo>/.llm_rate_limiter.db`` (gitignored), override with ``LLM_RATE_LIMITER_DB``.
-
-Buckets and limits (observed on free tiers, 2026-09 - RE-VERIFY, these drift)
----------------------------------------------------------------------------
                                        per minute            per day
-  embed    (gemini-embedding-001)      100 req / 30k tok     1,000 req  <- hard wall
-  generate (gemini-3-flash-preview)    ~5 req                ~20 req    <- also a wall
-  generate (gemini-flash-*-latest)     ~5 req                ~20 req
-  groq     (openai/gpt-oss-120b, ...)  ~30 req / 8k tok      ~1,000 req
+  embed    (gemini-embedding-001)      100 req / 30k tok     1,000 req
+  generate (gemini-3-flash-preview)    ~5 req                ~20 req
+  groq     (whole model chain)         5k tok (sustained)    ~1,000 req
 
-- ``request_type`` is ``"<family>:<model>"`` (or just ``"<family>"``). The MODEL
-  is the bucket - each Gemini/Groq model has its own quota window - so a
-  fallback chain across models multiplies effective headroom.
-- Each text in an ``embed_content`` batch counts as one request (a 90-text batch =
-  90). Pass ``count=90``.
-- ``groq``'s binding limit is **tokens/minute** (~8k), so the limiter paces agent
-  calls by token spend, not just count.
+``request_type`` is ``"<family>:<model>"``. Gemini models have separate windows,
+so a fallback chain across them adds headroom; Groq limits the whole account,
+so one bucket covers every Groq model. Each text in an embedding batch counts
+as one request (pass ``count``). Override limits with
+``LLM_RL_<FAMILY>_RPM`` / ``_TPM`` / ``_RPD``.
 
-Override any limit via env: ``LLM_RL_<FAMILY>_RPM`` / ``_TPM`` / ``_RPD``
-(family = the part before ``:``), e.g. ``LLM_RL_GROQ_TPM=600000`` on a paid key.
-
-Interface
----------
-    rid = acquire(estimated_tokens, request_type="groq:openai/gpt-oss-120b")  # blocks
+    rid = acquire(estimated_tokens, request_type="groq:openai/gpt-oss-120b")
     try:
-        resp = groq_client.chat.completions.create(...)
-    except RateLimited/429:
-        refund(rid, "groq:openai/gpt-oss-120b")   # a 429 did not spend quota
-        ...backoff / rotate model / retry...
+        response = client.chat.completions.create(...)
+    except RateLimitError:
+        refund(rid, "groq:openai/gpt-oss-120b")   # a rejected call spent nothing
 
-    with reserve(est_tokens, "generate:gemini-3-flash-preview"):   # ctx-manager form
-        resp = gemini_client.models.generate_content(...)          # auto-refunds on error
+    with reserve(est_tokens, "generate:gemini-3-flash-preview"):   # refunds on error
+        response = client.models.generate_content(...)
 
-``acquire`` raises ``QuotaExceededError`` when the daily cap for a bucket is
-already spent (waiting hours is not "blocking appropriately") or when ``timeout``
-seconds pass while waiting on the per-minute window.
+``acquire`` raises ``QuotaExceededError`` when a bucket's daily cap is spent or
+``timeout`` elapses while waiting on the per-minute window.
 """
 
 from __future__ import annotations
@@ -113,22 +73,13 @@ class Limits:
 _DEFAULTS: dict[str, Limits] = {
     # Gemini embeddings - each chunk is one request; 1,000/day is a genuine wall.
     "embed": Limits(rpm=100, tpm=30_000, rpd=1_000, tpd=0),
-    # Gemini generation (research-mcp sentiment). The free tier is stingy and moved
-    # during development: ~20 req/DAY, ~5 req/min per model. Defaulting tight means
-    # the limiter trips the wall and the caller's model-fallback chain kicks in
-    # *before* a messy 429.
+    # Gemini generation (news sentiment): ~20 req/day and ~5 req/min per model.
+    # Keeping the limit tight lets the caller's model fallback start before a 429.
     "generate": Limits(rpm=6, tpm=240_000, rpd=20, tpd=0),
-    # Groq generation (the agents' reasoning). Free tier. The rate-limit headers
-    # advertise ~8k tokens/min, but MEASURED behaviour is lower: a 6-agent
-    # multi-company run paced to ~7.1k tok/min (per the ledger) still had Groq
-    # 429 half its calls, with req/day and a generous daily-token budget both
-    # barely touched. So tpm is set to 5k - the real sustainable rate - and the
-    # bucket is shared across the whole model chain (Groq rate-limits account-wide;
-    # per-model buckets just admit calls Groq then rejects). tpd (daily tokens) is
-    # a softer wall, an estimate, since Groq enforces one that isn't in its
-    # headers. On a paid key: LLM_RL_GROQ_TPM=... and LLM_RL_GROQ_TPD=0.
-    # Cost of the low tpm: a single-company query ~60k tokens ≈ 12 min, a
-    # multi-company one ~100k ≈ 20 min. Fine for this project; not production.
+    # Groq generation (agent reasoning). The headers advertise 8k tokens/min, but
+    # sustained use above ~5k still draws 429s, and the limit is account-wide, so
+    # one bucket spans the model chain. The daily token cap is not in the headers;
+    # tpd is an estimate. Paid key: LLM_RL_GROQ_TPM=... and LLM_RL_GROQ_TPD=0.
     "groq": Limits(rpm=27, tpm=5_000, rpd=950, tpd=350_000),
 }
 _FALLBACK = Limits(rpm=6, tpm=200_000, rpd=20, tpd=0)
@@ -241,18 +192,18 @@ def acquire(
     count: int = 1,
     timeout: float = 300.0,
 ) -> int:
-    """Block until a Gemini request fits the shared budget; record it; return an id.
+    """Block until a request fits its bucket's budget; record it; return an id.
 
     Args:
         estimated_tokens: rough input-token size of the request (for the TPM window).
-        request_type: "embed", "generate", or "generate:<model>".
+        request_type: "<family>" or "<family>:<model>", e.g. "groq:openai/gpt-oss-120b".
         count: how many quota "requests" this call is - 1 for generate, N for an
             N-item embed batch (each item counts).
         timeout: max seconds to wait on the per-minute window before giving up.
 
     Returns:
-        A reservation id; pass it to ``refund()`` if the request then fails with a
-        429 or never reaches Google (those don't consume quota).
+        A reservation id; pass it to ``refund()`` if the request is rejected with a
+        429 or never reaches the provider (neither consumes quota).
 
     Raises:
         QuotaExceededError: the daily cap is already reached, or ``timeout`` elapsed.

@@ -1,28 +1,11 @@
-"""Follow-up Agent - answers a conversational follow-up on a finished report,
-or says plainly that it can't and hands back a self-contained query for a
-fresh Planner run instead.
+"""Follow-up agent: answers a question about a finished report, or explains why
+it can't.
 
-What it is
-----------
-Modeled directly on ``agents/synthesis_agent.py``: no MCP server, no ReAct
-loop. It is handed the Planner's already-finished report for one job plus the
-conversation's prior follow-up turns, and makes ONE structured-output call
-that does two things at once:
-
-- If the report already contains enough to answer, it answers - grounded ONLY
-  in that report's content, carrying forward the strongest relevant hedge
-  (the same "work with what you have" ethos as synthesis_agent), never
-  inventing a number that isn't there.
-- If it doesn't (a company/metric not covered, or the question genuinely needs
-  fresher data than the report has), it says so in plain language AND produces
-  a ``standalone_query`` - a fully self-contained research question with any
-  reference to earlier turns ("its", "that company") already resolved, ready
-  to hand straight to ``agents.planner.plan()`` if the user chooses to escalate.
-
-Doing both in one call (rather than a classifier call followed by a separate
-rewrite call) halves the LLM cost of a follow-up that turns out to need
-escalation, and keeps this agent the same size as synthesis_agent's own
-``_synthesize`` helper.
+One structured-output call over the report and the conversation so far. When
+the report covers the question, the answer is grounded only in it and keeps its
+caveats. When it doesn't, the response says what is missing and includes a
+``standalone_query`` (references like "its" resolved) that can start a new
+research run. Doing both in one call keeps a follow-up to a single LLM request.
 
     from agents.followup_agent import answer_followup
     result = answer_followup(original_query, report, prior_turns, "and its ROE?")

@@ -1,6 +1,6 @@
 """research-mcp - MCP server for news, sentiment, and corporate announcements.
 
-Transport: stdio (for now). Run directly with:
+Transport: stdio. Run directly with:
 
     python mcp_servers/research_mcp/server.py
 

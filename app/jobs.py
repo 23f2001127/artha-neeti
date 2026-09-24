@@ -1,11 +1,8 @@
-"""Runs a Planner query as a background job, streaming its progress into Postgres.
+"""Runs a Planner query as a background job and writes its progress to Postgres.
 
-``run_job`` is what ``POST /research`` fires off as a detached ``asyncio`` task.
-It calls ``agents.planner.plan`` as-is (no reimplementation) and passes it a
-progress callback that writes the graph's intermediate state to the job row as it
-advances - so a client polling ``GET /research/{id}`` sees routing decisions land
-before the specialists finish, and ``specialist_status`` flip pending -> ok/error
-one agent at a time.
+The progress callback stores routing as soon as it is decided and updates
+``specialist_status`` as each specialist moves, so a polling client can show
+the run as it happens. Chart data is built when the report is finished.
 """
 
 from __future__ import annotations
@@ -58,10 +55,8 @@ def _progress_writer(job_id: str) -> Callable[[dict], None]:
         if "specialist_status" in frag:
             patch["specialist_status"] = frag["specialist_status"]
         if "mode" in frag:
-            # Routing just landed - this is the one point where we know enough
-            # (the run's overall shape) to give a real, historical estimate.
-            # Computed once here rather than re-derived on every poll, so it's
-            # a stable number for the client to count down from.
+            # Estimated once, when the run's shape is known, so the client has a
+            # stable number to count down from.
             try:
                 seconds, samples = db.estimate_duration_seconds(frag["mode"])
             except Exception:  # noqa: BLE001 - an ETA is a nicety, never fatal

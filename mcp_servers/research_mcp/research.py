@@ -1,22 +1,15 @@
-"""Core research functions: news search, LLM sentiment, corporate announcements.
+"""News search, sentiment classification and corporate announcements.
 
-Framework-agnostic, exactly like ``market_data.py`` next door: plain arguments in,
-plain JSON-serialisable dicts out. A function never raises for an expected failure
-(missing key, rate limit, empty results, API error) - it returns
-``{"error": "<human readable message>"}`` instead. Every successful response
-carries an ``as_of`` UTC timestamp.
+Plain functions returning JSON-serialisable dicts, wrapped by ``server.py``.
+Expected failures (missing key, rate limit, no results, API error) return
+``{"error": "<message>"}`` instead of raising; successful responses carry an
+``as_of`` UTC timestamp.
 
-External services
------------------
-- **Tavily** (``TAVILY_API_KEY``) - web / news search.
-- **Gemini** (``GEMINI_API_KEY``) - LLM used for sentiment classification. We use
-  the LLM directly rather than hosting a fine-tuned sentiment model, to keep the
-  dependency footprint small. Default model ``gemini-flash-latest``; override with
-  ``GEMINI_MODEL``.
+- Tavily (``TAVILY_API_KEY``) for web and news search.
+- Gemini (``GEMINI_API_KEY``) classifies sentiment, avoiding a hosted model.
+  ``GEMINI_MODEL`` overrides the first model in the fallback chain.
 
-Both keys are read from the project ``.env`` (real environment variables win over
-the file). See ``README.md`` for the honest list of what these approximations do
-and do not guarantee.
+The limits of these approximations are listed in this package's README.
 """
 
 from __future__ import annotations
@@ -43,8 +36,8 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 from shared import llm_rate_limiter as rl  # noqa: E402
 
-# gemini-2.5-flash is now 404 for new API keys; gemini-flash-latest is the alias
-# but gets overloaded (503) at times, so we try a small chain.
+# gemini-2.5-flash returns 404 for new API keys, and the -latest alias is
+# intermittently overloaded (503), so sentiment calls walk a short chain.
 DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview"
 # Fallbacks live in different free-tier quota buckets, so a 429 on one is not a
 # 429 on the next. gemini-flash-latest's *daily* free quota is small (~20/day) -

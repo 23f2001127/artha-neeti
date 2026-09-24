@@ -1,51 +1,22 @@
-"""agents/planner.py - the LangGraph orchestrator that turns a raw question into
-ArthaNeeti's end-to-end research pipeline.
+"""The Planner: a LangGraph pipeline from a question to a finished report.
 
-The graph
----------
-    START -> route -> (gather -> synthesize -> [compare]) -> finalize -> END
+    START -> route -> gather -> synthesize -> [compare | portfolio] -> finalize -> END
 
-- **route**   one Groq call decides: which compan(ies) (resolved to NSE tickers,
-              flagged if yfinance can't confirm them), single vs multi-company,
-              and which of the three specialists each company actually needs -
-              selective, with a stated reason for every skip. Filings is skipped
-              up front for any company outside the 10-report RAG corpus.
-- **gather**  runs the selected specialists, as a bounded-concurrency fan-out over
-              the (company x specialist) matrix. Each specialist is the existing
-              agent, called through its own ``run`` coroutine - nothing is
-              reimplemented or bypassed.
-- **synthesize** one ``synthesis_agent.synthesize`` call per company over whatever
-              specialist outputs came back (its proven Case-2 partial handling
-              does the rest).
-- **compare** multi-company only: a light Groq call over the finished per-company
-              reports for a cross-company read. (Design note below.)
-- **finalize** assembles the output, including the full routing rationale.
+- route: one LLM call resolves the companies (NSE tickers), the mode (single,
+  comparison or portfolio) and which specialists each company needs, with a
+  reason for every skip. Annual-report analysis is only routed for companies
+  whose report is indexed.
+- gather: runs the selected specialists with bounded concurrency.
+- synthesize: one synthesis call per company over whatever came back.
+- compare / portfolio: multi-company only; one structured call over the
+  finished per-company reports (portfolio metrics are computed in code).
+- finalize: assembles the report, routing rationale and sentiment signals.
 
-Multi-company design
---------------------
-Per-company full pipeline (specialists + synthesis) FIRST, then one comparison
-step over the finished reports. Chosen over "one synthesis call across everything"
-because (a) the user gets a proper standalone research view per company AND the
-comparison, (b) each company keeps its own conflict-flagging and caveats instead
-of them being blended, (c) it reuses ``synthesis_agent`` unchanged. The comparison
-step is deliberately its own small structured call, not another ``synthesize``
-invocation - ``synthesize``'s schema/prompt are built for one company's raw
-specialist output, not for reports that are already synthesised.
+Each company gets a complete report of its own before any cross-company step,
+so conflicts and caveats stay attributed to the company they belong to.
 
-Concurrency
------------
-``PLANNER_MAX_CONCURRENCY`` (default 2, read per-call) bounds in-flight specialist
-agents. Each fires 3-5 Groq calls and spawns an MCP subprocess; this project's
-Groq budget is ~5k tokens/min shared (measured) and the machine is memory-tight.
-2 overlaps the non-LLM work (MCP spawn, Tavily, embeddings) for a single-company
-query. A multi-company query (up to 6 specialist agents) is safest at **1** on the
-free tier - the first test run 429-cascaded at 2 - so the caller should set
-``PLANNER_MAX_CONCURRENCY=1`` for comparisons until the quota headroom is there.
-
-Use
----
     from agents.planner import plan_sync
-    result = plan_sync("give me a complete research view on TCS")
+    report = plan_sync("give me a complete research view on TCS")
 """
 
 from __future__ import annotations
@@ -70,23 +41,17 @@ log = logging.getLogger(__name__)
 
 
 def _concurrency(multi: bool = False) -> int:
-    """Max in-flight specialist agents, read per-call. An explicit
-    ``PLANNER_MAX_CONCURRENCY`` wins. Otherwise: 2 for a single-company query
-    (overlaps MCP spawn / Tavily / embeddings), but **1** for a multi-company one -
-    that fans out to up to 6 specialist agents and 429-cascaded at 2 on the free
-    Groq budget (~5k tokens/min shared, measured). At 1 the fan-out serializes through the
-    shared limiter and calls wait rather than fail."""
+    """Specialist agents allowed to run at once. PLANNER_MAX_CONCURRENCY wins;
+    otherwise 2 for one company and 1 for several, since a multi-company run
+    fans out to up to six agents sharing one free-tier Groq budget."""
     env = os.environ.get("PLANNER_MAX_CONCURRENCY")
     if env is not None:
         return max(1, int(env))
     return 1 if multi else 2
 
 
-# Optional intermediate-progress hook. A caller (the FastAPI job runner) sets this
-# via plan(on_progress=...); nodes push {routing_trace, routing, specialist_status,
-# ...} fragments through it as the graph advances, so a client polling mid-run sees
-# real progress instead of silence. Best-effort - a failing callback never breaks
-# the run. A ContextVar (not a global) so concurrent plan() calls stay isolated.
+# Progress callback for the current plan() call (a ContextVar so concurrent runs
+# stay isolated). Nodes push state fragments through it; failures are ignored.
 _progress_cb: contextvars.ContextVar[Callable[[dict], None] | None] = contextvars.ContextVar(
     "planner_progress_cb", default=None
 )
@@ -315,10 +280,8 @@ def _norm_ticker(sym: str) -> str:
 
 
 async def _validate_ticker(base: str) -> tuple[bool, str]:
-    """(resolvable, note). Known large-caps pass free; the rest get ONE cheap
-    yfinance existence check (fast_info, not full .info). This is the only place
-    the planner touches yfinance directly, and only to confirm a symbol exists -
-    never for data (that stays with market-data-mcp)."""
+    """(resolvable, note). Known large-caps pass without a lookup; anything else
+    gets one lightweight yfinance existence check."""
     if not base:
         return False, "routing proposed no ticker"
     if base in _KNOWN_NSE:
@@ -374,10 +337,7 @@ async def _route_node(state: PlannerState) -> dict:
         base = _norm_ticker(rc.ticker)
         resolvable, note = await _validate_ticker(base)
         in_corpus = base in INGESTED_TICKERS
-        # Per-specialist selected/skipped-with-reason for THIS company - the same
-        # decision the trace strings below narrate, kept structured too so the
-        # frontend can render it live without parsing log lines (see `routing`
-        # below / RoutingPanel.jsx).
+        # The same decision the trace lines narrate, kept structured for the UI.
         specialist_decisions: list[dict] = []
         companies_out.append({
             "name": rc.name, "ticker": base, "nse_symbol": f"{base}.NS" if base else None,
@@ -517,9 +477,7 @@ async def _gather_node(state: PlannerState) -> dict:
         full_q = f"{company} ({ticker}.NS): {sub_query}"
 
         def stage(msg: str) -> None:
-            # Per-tool-call granularity while a specialist runs (previously this
-            # cell just sat at "pending" for the whole 1-2 minutes) - "calling
-            # get_quote...", "reading results...", "writing summary...".
+            # Per-step status text while the specialist runs ("calling get_quote...").
             status[ticker][specialist] = msg
             _emit(specialist_status=_deep(status))
 
@@ -826,13 +784,10 @@ async def plan(
     model_name: str = DEFAULT_MODEL,
     on_progress: Callable[[dict], None] | None = None,
 ) -> dict:
-    """Route -> gather -> synthesize -> [compare] -> finalize. Returns the final
-    report dict, including the full routing rationale in ``routing_trace``.
+    """Run the pipeline and return the final report.
 
-    ``on_progress`` (optional): a sync callback invoked with intermediate-state
-    fragments as the graph advances - ``{routing, routing_trace, companies, mode}``
-    when routing finishes, then ``{specialist_status}`` each time a specialist
-    finishes. Lets a job runner stream live progress; see ``app/jobs.py``.
+    ``on_progress`` receives state fragments as the graph advances: routing when
+    it lands, then ``specialist_status`` as each specialist moves.
     """
     if not query or not query.strip():
         return {"query": query, "error": "query is empty."}

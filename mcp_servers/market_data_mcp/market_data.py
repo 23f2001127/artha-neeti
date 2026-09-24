@@ -1,20 +1,14 @@
-"""Core market-data functions backed by yfinance.
+"""Market data functions backed by yfinance.
 
-These functions are deliberately framework-agnostic: they take plain arguments and
-return plain JSON-serialisable dicts. The MCP layer in ``server.py`` is a thin
-wrapper around them, and the standalone ``test_market_data.py`` script calls them
-directly.
+Plain functions returning JSON-serialisable dicts; ``server.py`` exposes them
+over MCP and ``app/visuals.py`` calls them directly for charts.
 
-Design rules:
-- A function never raises for an expected failure (bad ticker, no data, network
-  hiccup). It returns ``{"error": "<human readable message>"}`` instead, so the
-  calling agent gets a clear signal rather than a stack trace.
-- Missing individual fields are reported as ``null`` and listed under a
-  ``"missing"`` key rather than omitted, so the consumer can tell "not available"
-  apart from "zero".
-- Tickers are for Indian listings. A bare symbol gets the NSE ``.NS`` suffix;
-  ``.BO`` (BSE) is also accepted. Symbols with an ampersand (e.g. ``M&M.NS``)
-  work as-is and must not be mangled.
+- Expected failures (unknown ticker, no data, network errors) return
+  ``{"error": "<message>"}`` instead of raising.
+- Unavailable fields are ``null`` and listed under ``"missing"``, so "not
+  available" is distinguishable from zero.
+- Bare symbols get the NSE ``.NS`` suffix; ``.BO`` (BSE) is accepted. Symbols
+  containing ``&`` (``M&M.NS``) are passed through unchanged.
 """
 
 from __future__ import annotations

@@ -1,13 +1,9 @@
-"""Runs an ad-hoc filing ingestion - uploaded or auto-fetched - as a background
-job, mirroring app/jobs.py's shape for research jobs: a job row is the source
-of truth, a detached asyncio task does the work, and a client polls for
-progress.
+"""Background jobs that add a company's annual report to the filings index,
+either from an uploaded PDF or one found on the web.
 
-Two ways to get the PDF (POST /filings/upload vs POST /filings/fetch), one
-shared tail from there: the actual chunk/embed/store pipeline is unchanged
-from the seeded corpus's CLI ingestion (mcp_servers/filings_rag_mcp/ingest.py's
-``ingest_file``), run in a worker thread (it's blocking I/O - embedding HTTP
-calls + psycopg2) with its progress streamed into Postgres.
+Both paths end in ``ingest_file`` (the same chunk, embed and store pipeline the
+seeded corpus uses), run in a worker thread with progress written to the job
+row for the client to poll.
 """
 
 from __future__ import annotations

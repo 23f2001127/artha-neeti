@@ -1,6 +1,6 @@
 """market-data-mcp - MCP server exposing yfinance-backed tools for Indian equities.
 
-Transport: stdio (for now). Run directly with:
+Transport: stdio. Run directly with:
 
     python mcp_servers/market_data_mcp/server.py
 

@@ -1,25 +1,11 @@
-"""Market Data Agent - a standalone LangGraph specialist for Indian-equity market data.
+"""Market data agent: prices, valuation and ratios through market-data-mcp.
 
-What it is
-----------
-Given a natural-language question about a listed company's market data, this agent
-reasons about which of ``market-data-mcp``'s 4 tools to call (often more than one -
-"how is X valued" needs fundamentals *and* ratios), calls them, and returns a
-structured result a future Synthesis Agent can consume, plus a human summary.
+Runs the MCP server as a subprocess and lets a ReAct loop choose among its
+tools (valuation questions usually need both fundamentals and ratios). Source
+metadata from the tool results (``as_of``, ``fiscal_year``, ``roe_source``) is
+collected into ``provenance``; full tool output is kept in ``raw_data``. Price
+histories are summarized before they reach the model to keep requests small.
 
-The shared agent machinery (MCP stdio client, Groq-backed ``create_react_agent``
-through ``shared/llm_rate_limiter.py``, model-fallback chain, trace extraction)
-lives in ``agents/_base.py``. This module supplies only the system prompt, the
-synthesis step, and the provenance extractor.
-
-- **MCP over stdio.** Spawns ``mcp_servers/market_data_mcp/server.py`` as a
-  subprocess and talks the MCP protocol - it does NOT import ``market_data.py``.
-- **Provenance preserved.** ``as_of`` / ``fiscal_year`` / ``roe_source`` /
-  ``last_fiscal_year_end`` from the MCP responses are lifted into a top-level
-  ``provenance`` block and the full output kept in ``raw_data``.
-
-Standalone use
---------------
     from agents.market_data_agent import run_sync
     result = run_sync("how is TCS valued compared to its fundamentals")
 """

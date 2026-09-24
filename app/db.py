@@ -1,12 +1,8 @@
-"""Postgres persistence for the research-job API.
+"""Postgres persistence for research jobs, follow-up turns and filing jobs.
 
-Same Supabase instance as ``filings-rag-mcp`` (``DATABASE_URL`` in ``.env``), and
-the same access pattern as ``mcp_servers/filings_rag_mcp/db.py``: a fresh
-connection per call via a ``@contextmanager``. A connection pool
-(``psycopg2.pool.ThreadedConnectionPool``) would be marginally better under load,
-but this is a single-process dev/portfolio backend and the query rate is tiny
-(one job row, updated a handful of times per run), so simplicity wins. Swap the
-pool in here if that changes.
+Uses the same database as filings-rag-mcp (``DATABASE_URL``). Each call opens
+its own short-lived connection; job rows see a handful of writes per run, so a
+pool isn't needed.
 """
 
 from __future__ import annotations
@@ -212,19 +208,10 @@ def get_job(job_id: str) -> dict | None:
 
 
 def estimate_duration_seconds(mode: str) -> tuple[float | None, int]:
-    """A real, historical-data-driven ETA, not a hardcoded guess: the average
-    wall-clock duration of past COMPLETED jobs (``updated_at - created_at``)
-    with the same routing ``mode`` ("single"/"multi"/"none") as this one, since
-    that's the single biggest driver of how long a run takes. Falls back to the
-    average across ALL completed jobs if fewer than 2 same-mode samples exist
-    yet, and to ``(None, 0)`` - no estimate, rather than fabricating one - if
-    there's no history at all. Returns ``(seconds, sample_count)`` so the
-    caller/UI can show how much history backs the number.
-
-    Deliberately not sliced further (e.g. by company count or which
-    specialists ran): with a small number of historical runs, slicing finer
-    than "mode" would leave most buckets empty. Coarser-but-real beats
-    precise-but-guessed.
+    """Average duration of past completed jobs in the same routing mode, as
+    ``(seconds, sample_count)``. Falls back to all completed jobs when the mode
+    has fewer than two samples, and to ``(None, 0)`` with no history. Finer
+    buckets (company count, specialists) would mostly be empty at current volume.
     """
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
