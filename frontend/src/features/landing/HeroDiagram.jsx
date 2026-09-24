@@ -1,36 +1,27 @@
 import { useEffect, useState } from "react";
 import AgentGraph from "../../components/agent-graph/AgentGraph";
+import { SPECIALISTS } from "../../components/agent-graph/deriveAgentGraph";
 
-const BASE = [
-  { id: "market_data", label: "Market Data", sub: "yfinance" },
-  { id: "news_sentiment", label: "News + Sentiment", sub: "Tavily · Gemini" },
-  { id: "filings", label: "Filings RAG", sub: "pgvector" },
+const FRAMES = [
+  { planner: "active", specialists: ["idle", "idle", "idle"], report: "idle" },
+  { planner: "done", specialists: ["active", "active", "idle"], report: "idle" },
+  { planner: "done", specialists: ["done", "active", "active"], report: "idle" },
+  { planner: "done", specialists: ["done", "done", "active"], report: "idle" },
+  { planner: "done", specialists: ["done", "done", "done"], report: "active" },
+  { planner: "done", specialists: ["done", "done", "done"], report: "done" },
+  { planner: "done", specialists: ["done", "done", "done"], report: "done" },
 ];
-
-// A self-running demo loop for the hero: route -> dispatch one specialist at a
-// time -> all done -> reset. Purely illustrative (the real, data-driven version
-// of this diagram lives in the progress view).
-const SEQUENCE = [
-  { planner: "active", statuses: ["idle", "idle", "idle"] },
-  { planner: "done", statuses: ["active", "idle", "idle"] },
-  { planner: "done", statuses: ["done", "active", "idle"] },
-  { planner: "done", statuses: ["done", "done", "active"] },
-  { planner: "done", statuses: ["done", "done", "done"] },
-];
-const STEP_MS = 1100;
+const FRAME_MS = 1400;
 
 export default function HeroDiagram() {
-  const [step, setStep] = useState(0);
+  const [frame, setFrame] = useState(0);
 
   useEffect(() => {
-    const id = setInterval(() => {
-      setStep((s) => (s + 1) % (SEQUENCE.length + 2)); // +2 = a brief pause on the all-done frame
-    }, STEP_MS);
+    const id = setInterval(() => setFrame((f) => (f + 1) % FRAMES.length), FRAME_MS);
     return () => clearInterval(id);
   }, []);
 
-  const frame = SEQUENCE[Math.min(step, SEQUENCE.length - 1)];
-  const nodes = BASE.map((n, i) => ({ ...n, status: frame.statuses[i] }));
-
-  return <AgentGraph nodes={nodes} plannerStatus={frame.planner} height={210} />;
+  const current = FRAMES[frame];
+  const nodes = SPECIALISTS.map((s, i) => ({ ...s, status: current.specialists[i] }));
+  return <AgentGraph nodes={nodes} plannerStatus={current.planner} reportStatus={current.report} />;
 }

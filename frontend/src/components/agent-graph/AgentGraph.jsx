@@ -1,60 +1,80 @@
-import { motion } from "framer-motion";
+import { useReducedMotion } from "../../hooks/useReducedMotion";
 
 const STATUS_COLOR = {
-  idle: "var(--color-ink-faint)",
+  idle: "var(--color-border-strong)",
   active: "var(--color-running)",
-  done: "var(--color-brand)",
+  done: "var(--color-ok)",
   error: "var(--color-error)",
   skipped: "var(--color-skip)",
 };
 
-function Node({ x, y, r, label, sub, status }) {
+const WIDTH = 600;
+const HEIGHT = 280;
+const CENTER_Y = 134;
+const PLANNER = { x: 72, y: CENTER_Y, r: 26 };
+const REPORT = { x: WIDTH - 72, y: CENTER_Y, r: 24 };
+const SPEC_X = WIDTH / 2;
+const SPEC_R = 19;
+
+function slotYs(count) {
+  // 90px apart leaves ~20px between one node's subtitle and the next node.
+  if (count === 1) return [CENTER_Y];
+  if (count === 2) return [CENTER_Y - 45, CENTER_Y + 45];
+  return [CENTER_Y - 90, CENTER_Y, CENTER_Y + 90];
+}
+
+function curve(x1, y1, x2, y2) {
+  const dx = (x2 - x1) * 0.55;
+  return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+}
+
+function Electrons({ path, count, duration, color }) {
+  return Array.from({ length: count }, (_, i) => (
+    <circle key={i} r="3" fill={color} className="electron" style={{ "--glow": color }}>
+      <animateMotion dur={`${duration}s`} begin={`${(i * duration) / count}s`} repeatCount="indefinite" path={path} />
+    </circle>
+  ));
+}
+
+function Edge({ path, status, reducedMotion }) {
   const color = STATUS_COLOR[status] || STATUS_COLOR.idle;
+  const lit = status === "active" || status === "done";
   return (
     <g>
-      {status === "active" && (
-        <motion.circle
-          cx={x}
-          cy={y}
-          r={r}
-          fill="none"
-          stroke={color}
-          strokeWidth="1.5"
-          initial={{ opacity: 0.6, scale: 1 }}
-          animate={{ opacity: 0, scale: 1.9 }}
-          transition={{ duration: 1.4, repeat: Infinity, ease: "easeOut" }}
-          style={{ transformOrigin: `${x}px ${y}px` }}
-        />
+      <path
+        d={path}
+        fill="none"
+        stroke={lit || status === "error" ? color : "var(--color-border)"}
+        strokeWidth={lit ? 1.8 : 1.4}
+        strokeDasharray={status === "skipped" ? "3 5" : undefined}
+        opacity={status === "done" ? 0.55 : 1}
+      />
+      {!reducedMotion && status === "active" && (
+        <Electrons path={path} count={3} duration={1.3} color="var(--color-brand)" />
       )}
-      <motion.circle
-        cx={x}
-        cy={y}
-        r={r}
-        fill="var(--color-surface)"
-        stroke={color}
-        strokeWidth="1.6"
-        animate={{ stroke: color }}
-        transition={{ duration: 0.4 }}
-      />
-      <motion.circle
-        cx={x}
-        cy={y}
-        r={r * 0.32}
-        fill={color}
-        animate={{ fill: color, opacity: status === "idle" ? 0.4 : 1 }}
-        transition={{ duration: 0.4 }}
-      />
-      <text
-        x={x}
-        y={y + r + 16}
-        textAnchor="middle"
-        className="mono"
-        style={{ fontSize: 10, fill: "var(--color-ink)", fontWeight: 500 }}
-      >
+      {!reducedMotion && status === "done" && (
+        <Electrons path={path} count={2} duration={2.6} color="var(--color-brand)" />
+      )}
+    </g>
+  );
+}
+
+function Node({ x, y, r, label, sub, status, labelPosition = "below" }) {
+  const color = STATUS_COLOR[status] || STATUS_COLOR.idle;
+  const dim = status === "idle" || status === "skipped";
+  const labelY = labelPosition === "below" ? y + r + 17 : y - r - 22;
+  return (
+    <g opacity={status === "skipped" ? 0.6 : 1}>
+      {status === "active" && (
+        <circle cx={x} cy={y} r={r} fill="none" stroke={color} strokeWidth="1.5" className="node-pulse" />
+      )}
+      <circle cx={x} cy={y} r={r} fill="var(--color-surface)" stroke={color} strokeWidth="1.8" />
+      <circle cx={x} cy={y} r={r * 0.34} fill={color} opacity={dim ? 0.5 : 1} />
+      <text x={x} y={labelY} textAnchor="middle" style={{ fontSize: 12, fontWeight: 600, fill: "var(--color-ink)" }}>
         {label}
       </text>
       {sub && (
-        <text x={x} y={y + r + 29} textAnchor="middle" style={{ fontSize: 8.5, fill: "var(--color-ink-faint)" }}>
+        <text x={x} y={labelY + 14} textAnchor="middle" style={{ fontSize: 10.5, fill: "var(--color-ink-faint)" }}>
           {sub}
         </text>
       )}
@@ -62,61 +82,39 @@ function Node({ x, y, r, label, sub, status }) {
   );
 }
 
-function Edge({ x1, y1, x2, y2, status }) {
-  const active = status === "active" || status === "done";
-  const color = STATUS_COLOR[status] || STATUS_COLOR.idle;
-  const dx = (x2 - x1) * 0.5;
-  const path = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
-  return (
-    <>
-      <path d={path} fill="none" stroke="var(--color-border)" strokeWidth="1.5" />
-      {active && (
-        <path
-          d={path}
-          fill="none"
-          stroke={color}
-          strokeWidth="1.5"
-          className={status === "active" ? "flow-line" : ""}
-          opacity={status === "active" ? 0.9 : 0.5}
-        />
-      )}
-    </>
-  );
-}
-
 /**
- * A small SVG diagram of the real pipeline shape: Planner -> up to 3
- * specialists. `nodes` = [{id,label,sub,status}] for market_data /
- * news_sentiment / filings (status: idle|active|done|error|skipped).
- * `plannerStatus` colors the hub node the same way.
+ * Planner -> specialists -> report pipeline. `nodes` are the specialists
+ * ({ id, label, sub, status }); statuses are idle | active | done | error |
+ * skipped.
  */
-// Room reserved below the lowest node's center for its two-line label (name +
-// sub). Proportional slot positions (rather than fixed-pixel margins) keep
-// this correct at any `height` the caller passes; the 3-node case is the tight
-// one since its bottom slot sits closest to the edge.
-const LABEL_ROOM = 34;
+export default function AgentGraph({ nodes, plannerStatus = "idle", reportStatus = "idle" }) {
+  const reducedMotion = useReducedMotion();
+  const ys = slotYs(nodes.length);
 
-export default function AgentGraph({ nodes, plannerStatus = "idle", height = 190 }) {
-  const width = 420;
-  const viewH = nodes.length >= 3 ? height + LABEL_ROOM : height;
-  const hub = { x: 62, y: height / 2 };
-  const slotY =
-    nodes.length === 1
-      ? [height / 2]
-      : nodes.length === 2
-        ? [height * 0.28, height * 0.72]
-        : [height * 0.14, height / 2, height * 0.86];
-  const nx = width - 78;
+  const inbound = nodes.map((n, i) => ({
+    id: n.id,
+    path: curve(PLANNER.x + PLANNER.r, PLANNER.y, SPEC_X - SPEC_R, ys[i]),
+    status: n.status,
+  }));
+  const outbound = nodes.map((n, i) => ({
+    id: n.id,
+    path: curve(SPEC_X + SPEC_R, ys[i], REPORT.x - REPORT.r, REPORT.y),
+    status: n.status === "done" ? (reportStatus === "idle" ? "done" : reportStatus) : n.status === "skipped" ? "skipped" : "idle",
+  }));
 
   return (
-    <svg viewBox={`0 0 ${width} ${viewH}`} className="w-full h-auto" role="img" aria-label="Agent pipeline status">
-      {nodes.map((n, i) => (
-        <Edge key={n.id} x1={hub.x + 20} y1={hub.y} x2={nx - 20} y2={slotY[i]} status={n.status} />
+    <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} className="w-full h-auto" role="img" aria-label="Research pipeline status">
+      {inbound.map((e) => (
+        <Edge key={`in-${e.id}`} path={e.path} status={e.status} reducedMotion={reducedMotion} />
       ))}
-      <Node x={hub.x} y={hub.y} r={20} label="Planner" status={plannerStatus} />
-      {nodes.map((n, i) => (
-        <Node key={n.id} x={nx} y={slotY[i]} r={16} label={n.label} sub={n.sub} status={n.status} />
+      {outbound.map((e) => (
+        <Edge key={`out-${e.id}`} path={e.path} status={e.status} reducedMotion={reducedMotion} />
       ))}
+      <Node {...PLANNER} label="Planner" sub="routes the question" status={plannerStatus} />
+      {nodes.map((n, i) => (
+        <Node key={n.id} x={SPEC_X} y={ys[i]} r={SPEC_R} label={n.label} sub={n.sub} status={n.status} />
+      ))}
+      <Node {...REPORT} label="Report" sub="synthesis" status={reportStatus} />
     </svg>
   );
 }
