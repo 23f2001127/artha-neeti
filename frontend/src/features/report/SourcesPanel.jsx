@@ -3,6 +3,17 @@ import { specialistLabel } from "../../lib/labels";
 
 const COLLAPSED_COUNT = 4;
 
+// Older reports split citations on every comma, e.g. ["news (site", "date)"].
+function joinFragments(sources) {
+  const out = [];
+  for (const part of sources) {
+    const prev = out[out.length - 1];
+    if (prev && (prev.match(/\(/g) || []).length > (prev.match(/\)/g) || []).length) out[out.length - 1] = `${prev}, ${part}`;
+    else out.push(part);
+  }
+  return out;
+}
+
 function describeSource(source) {
   const key = source.split(/[\s(,]/)[0];
   const label = specialistLabel(key);
@@ -33,7 +44,7 @@ export default function SourcesPanel({ sourcesByClaim = {} }) {
             <div className="min-w-0">
               <p className="text-[13.5px] text-[var(--color-ink)] leading-relaxed">{claim}</p>
               <p className="mt-1 text-[12px] text-[var(--color-ink-faint)]">
-                {(meta.sources || []).map(describeSource).join("  ·  ") || "Unattributed"}
+                {joinFragments(meta.sources || []).map(describeSource).join("  ·  ") || "Unattributed"}
               </p>
               {meta.caveat && <p className="mt-1 text-[12px] text-[var(--color-ink-muted)]">{meta.caveat}</p>}
             </div>

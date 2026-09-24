@@ -53,6 +53,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
+import logging
 import operator
 import os
 import sys
@@ -63,6 +64,10 @@ from pydantic import BaseModel, Field
 
 from agents import _base, filings_agent, market_data_agent, news_sentiment_agent, synthesis_agent
 from agents._base import DEFAULT_MODEL
+from mcp_servers.market_data_mcp import market_data as md
+
+log = logging.getLogger(__name__)
+
 
 def _concurrency(multi: bool = False) -> int:
     """Max in-flight specialist agents, read per-call. An explicit
@@ -620,15 +625,29 @@ async def _compare_node(state: PlannerState) -> dict:
     }
 
 
-def _extract_field(raw_data: dict | None, key: str, types: tuple) -> Any:
-    """Scan every tool result in one specialist's raw_data for `key` at the top
-    level, return the first match. Both get_fundamentals and get_ratios return
-    sector/pe_ratio/roe/dividend_yield_pct as flat keys, so this doesn't need
-    to know which specific tool the ReAct loop happened to call."""
+def _extract_field(raw_data: dict | None, key: str, types: tuple, ticker: str | None = None) -> Any:
+    """First top-level `key` across one specialist's tool results. With `ticker`,
+    results about another company are skipped: the agent may look up a peer, and
+    raw_data keeps only the last call per tool."""
+    want = md.normalize_ticker(ticker) if ticker else None
     for result in (raw_data or {}).values():
-        if isinstance(result, dict) and isinstance(result.get(key), types):
-            return result[key]
+        if not isinstance(result, dict) or not isinstance(result.get(key), types):
+            continue
+        if want and result.get("ticker") and str(result["ticker"]).upper() != want:
+            continue
+        return result[key]
     return None
+
+
+def _fetch_metrics(ticker: str) -> dict:
+    """Fundamentals and ratios straight from the market-data functions (no LLM)."""
+    out = {}
+    for name, fn in (("fundamentals", md.get_fundamentals), ("ratios", md.get_ratios)):
+        try:
+            out[name] = fn(ticker)
+        except Exception:  # noqa: BLE001 - a missing metric is reported, not fatal
+            log.warning("portfolio: %s(%s) failed", name, ticker, exc_info=True)
+    return out
 
 
 def _weighted_avg(rows: list[dict], weight_key: str, value_key: str) -> float | None:
@@ -651,18 +670,19 @@ async def _portfolio_node(state: PlannerState) -> dict:
         return {"graph_path": ["portfolio: skipped (fewer than 2 weighted, usable holdings)"]}
 
     metrics_missing: list[str] = []
+    fields = (("sector", (str,)), ("pe_ratio", (int, float)), ("roe", (int, float)), ("dividend_yield_pct", (int, float)))
     for h in holdings:
         md_raw = ((specialist_outputs.get(h["ticker"]) or {}).get("market_data") or {}).get("raw_data")
-        h["sector"] = _extract_field(md_raw, "sector", (str,))
-        h["pe_ratio"] = _extract_field(md_raw, "pe_ratio", (int, float))
-        # get_ratios returns roe as a FRACTION (0.15 == 15%, see market_data.py's
-        # own notes), unlike dividend_yield_pct which is already a percentage -
-        # normalize here so weighted_roe is a percentage too, consistent with
-        # weighted_dividend_yield_pct and the frontend's shared "%" suffix.
-        roe_fraction = _extract_field(md_raw, "roe", (int, float))
-        h["roe"] = round(roe_fraction * 100, 2) if roe_fraction is not None else None
-        h["dividend_yield_pct"] = _extract_field(md_raw, "dividend_yield_pct", (int, float))
-        if md_raw is None:
+        values = {key: _extract_field(md_raw, key, types, h["ticker"]) for key, types in fields}
+        if any(v is None for v in values.values()):
+            direct = await asyncio.to_thread(_fetch_metrics, h["ticker"])
+            for key, types in fields:
+                if values[key] is None:
+                    values[key] = _extract_field(direct, key, types, h["ticker"])
+        h["sector"], h["pe_ratio"], h["dividend_yield_pct"] = values["sector"], values["pe_ratio"], values["dividend_yield_pct"]
+        # get_ratios reports roe as a fraction; dividend_yield_pct is already a percentage.
+        h["roe"] = round(values["roe"] * 100, 2) if values["roe"] is not None else None
+        if all(values[k] is None for k in ("pe_ratio", "roe", "dividend_yield_pct")):
             metrics_missing.append(h["ticker"])
 
     sector_allocation: dict[str, float] = {}
@@ -768,8 +788,8 @@ def _finalize_node(state: PlannerState) -> dict:
     }
     if state.get("mode") == "none":
         final["note"] = (
-            "No company could be resolved to a usable data source for this query; "
-            "nothing was dispatched. See routing_trace."
+            "No NSE-listed company could be identified in this question, so no research was run. "
+            "Try naming the company or its NSE ticker."
         )
     return {"final": final, "graph_path": ["finalize"]}
 

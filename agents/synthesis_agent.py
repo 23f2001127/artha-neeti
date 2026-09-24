@@ -51,6 +51,7 @@ and it names which specialist(s) the claim came from (``sources_by_claim``).
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 from typing import Any
 
@@ -241,6 +242,9 @@ def _looks_like_gen_failure(exc: BaseException) -> bool:
 
 
 
+# Commas inside a citation's parentheses ("news_sentiment (site, date)") are not separators.
+_SOURCE_SPLIT_RE = re.compile(r",(?![^()]*\))")
+
 _SECTION_NAMES = {
     "market_data": "Market data",
     "news_sentiment": "News coverage",
@@ -363,7 +367,7 @@ async def synthesize(
 
     sources_by_claim = {
         c.claim: {
-            "sources": [s.strip() for s in (c.sources or "").split(",") if s.strip()],
+            "sources": [s.strip() for s in _SOURCE_SPLIT_RE.split(c.sources or "") if s.strip()],
             "caveat": c.caveat,
         }
         for c in report.key_claims
