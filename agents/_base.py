@@ -164,8 +164,18 @@ def is_too_large_error(exc: BaseException) -> bool:
     return "413" in text or "request too large" in text or "payload too large" in text
 
 
+def is_generation_error(exc: BaseException) -> bool:
+    """The model emitted a malformed or schema-invalid tool call (transient)."""
+    text = str(exc).lower()
+    return (
+        "tool_use_failed" in text
+        or "failed to parse tool call" in text
+        or "tool call validation failed" in text
+    )
+
+
 def is_rate_error(exc: BaseException) -> bool:
-    if is_too_large_error(exc):
+    if is_too_large_error(exc) or is_generation_error(exc):
         return False
     text = str(exc).lower()
     return (
@@ -219,11 +229,12 @@ def msg_text(content: Any) -> str:
 class RateLimitedChatGroq(ChatGroq):
     """ChatGroq that paces every call through the shared limiter, fits each
     request under the per-request token limit, and rotates through a fallback
-    chain on genuine rate limiting. Drops straight into ``create_react_agent``.
+    chain on rate limiting or malformed output. Drops straight into ``create_react_agent``.
 
     One reservation per call against a single account-wide ``"groq"`` bucket.
     A 413 (request too large) is retried once on the same model with a tighter
-    budget; rotating would not help since every model shares the limit.
+    budget; rotating would not help since every model shares the limit. A
+    malformed tool call is retried once, then falls through to the next model.
     """
 
     def _candidates(self) -> list[str]:
@@ -240,69 +251,84 @@ class RateLimitedChatGroq(ChatGroq):
         tighter = max(1000, int(budget * min(ratio, 0.9) * 0.85))
         return fit_messages(messages, tighter), tighter
 
+    def _on_failure(self, exc: BaseException, cand: str, attempt: int, state: dict) -> str:
+        """Decide what to do after a failed call: "retry" the same model,
+        move to the "next" model, or "raise". Mutates ``state`` (messages,
+        budget, errors) for the retry."""
+        if is_too_large_error(exc):
+            if attempt == 0:
+                state["messages"], state["budget"] = self._refit_after_413(state["messages"], exc, state["budget"])
+                return "retry"
+            raise RequestTooLargeError(
+                f"request still exceeds {cand}'s {REQUEST_TOKEN_LIMIT}-token limit after compaction"
+            ) from exc
+        if is_generation_error(exc):
+            if attempt == 0:
+                return "retry"
+            state["errors"].append(f"{cand}: malformed tool call")
+            return "next"
+        if is_rate_error(exc):
+            state["rate_limited"] = True
+            state["errors"].append(f"{cand}: rate limited")
+            return "next"
+        return "raise"
+
+    @staticmethod
+    def _exhausted(state: dict) -> BaseException:
+        detail = " | ".join(state["errors"])
+        if state["rate_limited"]:
+            return rl.QuotaExceededError(f"all fallback models failed: {detail}")
+        return AgentError(f"all fallback models failed: {detail}")
+
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        budget = self._input_budget(kwargs)
-        messages = fit_messages(messages, budget)
+        state = {"budget": self._input_budget(kwargs), "errors": [], "rate_limited": False}
+        state["messages"] = fit_messages(messages, state["budget"])
         original = self.model_name
-        rid = rl.acquire(estimate_tokens(messages), "groq", timeout=240.0)
-        errs: list[str] = []
+        rid = rl.acquire(estimate_tokens(state["messages"]), "groq", timeout=240.0)
         used = False
         try:
             for cand in self._candidates():
                 object.__setattr__(self, "model_name", cand)
                 for attempt in range(2):
                     try:
-                        out = super()._generate(messages, stop, run_manager, **kwargs)
+                        out = super()._generate(state["messages"], stop, run_manager, **kwargs)
                         used = True
                         return out
                     except BaseException as exc:  # noqa: BLE001
-                        if is_too_large_error(exc) and attempt == 0:
-                            messages, budget = self._refit_after_413(messages, exc, budget)
-                            continue
-                        if is_too_large_error(exc):
-                            raise RequestTooLargeError(
-                                f"request still exceeds {cand}'s {REQUEST_TOKEN_LIMIT}-token limit after compaction"
-                            ) from exc
-                        if is_rate_error(exc):
-                            errs.append(f"{cand}: rate limited")
+                        action = self._on_failure(exc, cand, attempt, state)
+                        if action == "raise":
+                            raise
+                        if action == "next":
                             break
-                        raise
-            raise rl.QuotaExceededError("all fallback models are rate limited: " + " | ".join(errs))
+            raise self._exhausted(state)
         finally:
             object.__setattr__(self, "model_name", original)
             if not used:
                 rl.refund(rid, "groq")
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
-        budget = self._input_budget(kwargs)
-        messages = fit_messages(messages, budget)
+        state = {"budget": self._input_budget(kwargs), "errors": [], "rate_limited": False}
+        state["messages"] = fit_messages(messages, state["budget"])
         original = self.model_name
         rid = await asyncio.to_thread(
-            functools.partial(rl.acquire, estimate_tokens(messages), "groq", timeout=240.0)
+            functools.partial(rl.acquire, estimate_tokens(state["messages"]), "groq", timeout=240.0)
         )
-        errs: list[str] = []
         used = False
         try:
             for cand in self._candidates():
                 object.__setattr__(self, "model_name", cand)
                 for attempt in range(2):
                     try:
-                        out = await super()._agenerate(messages, stop, run_manager, **kwargs)
+                        out = await super()._agenerate(state["messages"], stop, run_manager, **kwargs)
                         used = True
                         return out
                     except BaseException as exc:  # noqa: BLE001
-                        if is_too_large_error(exc) and attempt == 0:
-                            messages, budget = self._refit_after_413(messages, exc, budget)
-                            continue
-                        if is_too_large_error(exc):
-                            raise RequestTooLargeError(
-                                f"request still exceeds {cand}'s {REQUEST_TOKEN_LIMIT}-token limit after compaction"
-                            ) from exc
-                        if is_rate_error(exc):
-                            errs.append(f"{cand}: rate limited")
+                        action = self._on_failure(exc, cand, attempt, state)
+                        if action == "raise":
+                            raise
+                        if action == "next":
                             break
-                        raise
-            raise rl.QuotaExceededError("all fallback models are rate limited: " + " | ".join(errs))
+            raise self._exhausted(state)
         finally:
             object.__setattr__(self, "model_name", original)
             if not used:
