@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { specialistLabel } from "../../lib/labels";
+import { readable } from "../../lib/prose";
 
 const COLLAPSED_COUNT = 4;
 
@@ -22,7 +23,7 @@ function describeSource(source) {
     .replace(/^[\s,(]+|[\s)]+$/g, "")
     .replace(/as_of\s*/i, "as of ")
     .trim();
-  return detail ? `${label} · ${detail}` : label;
+  return detail ? `${label} · ${readable(detail)}` : label;
 }
 
 export default function SourcesPanel({ sourcesByClaim = {} }) {

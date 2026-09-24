@@ -82,7 +82,9 @@ SPECIALIST_LABEL = {"market_data": "Market data", "news_sentiment": "News & sent
 # Reports saved before failures moved to report["unavailable"] carry the error in the section text.
 _LEGACY_UNAVAILABLE = re.compile(r"not available", re.IGNORECASE)
 _LLM_QUOTA_RE = re.compile(r"\bLLM (?:quota|rate)(?: limit)?\b", re.IGNORECASE)
-_ISO_TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?")
+_TOOL_RE = re.compile(r"\bget_([a-z0-9_]+)\b")
+_SNAKE_RE = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b")
+_ISO_TS_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?)?\b")
 
 # ---------------------------------------------------------------- page geometry
 
@@ -141,9 +143,20 @@ def _clean(text: Any) -> str:
     return "".join(out)
 
 
+def _plain(text: Any) -> str:
+    """Internal identifiers and timestamps in model prose, in reader terms:
+    "(news_sentiment, as_of 2026-09-21T08:30:00Z)" -> "(news sentiment, as of 21 Sep 2026)"."""
+    if text is None:
+        return ""
+    out = _LLM_QUOTA_RE.sub("usage limit", str(text).replace(chr(0x2011), "-"))
+    out = _ISO_TS_RE.sub(lambda m: fmt_date(m.group(0)), out)
+    out = _TOOL_RE.sub(lambda m: m.group(1), out)
+    return _SNAKE_RE.sub(lambda m: m.group(0).replace("_", " "), out)
+
+
 def _t(text: Any) -> str:
     """Paragraph-safe markup for plain text."""
-    return escape(_clean(text))
+    return escape(_clean(_plain(text)))
 
 
 def P(text: Any, style: str = "body") -> Paragraph:
@@ -151,7 +164,7 @@ def P(text: Any, style: str = "body") -> Paragraph:
 
 
 def _paragraphs(text: Any, style: str = "body") -> list[Paragraph]:
-    parts = [p.strip() for p in re.split(r"\n\s*\n", _clean(text or "")) if p.strip()]
+    parts = [p.strip() for p in re.split(r"\n\s*\n", _clean(_plain(text))) if p.strip()]
     return [Paragraph(escape(p).replace("\n", "<br/>"), S[style]) for p in parts]
 
 
@@ -710,14 +723,6 @@ def _evidence(sources_by_claim: dict) -> list:
     ]))
     story.append(t)
     return story
-
-
-def _plain(text: Any) -> str:
-    """Specialist keys and provider jargon in model prose, in reader terms."""
-    out = _LLM_QUOTA_RE.sub("usage limit", str(text))
-    for key, label in SPECIALIST_LABEL.items():
-        out = re.sub(rf"\b{key}\b", label.lower().replace(" & ", " and "), out)
-    return out
 
 
 def _limitations(caveats: list, missing: list) -> list:

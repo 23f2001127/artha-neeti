@@ -127,7 +127,13 @@ being a single year, any specialist that returned thin data. Non-empty whenever 
 any specialist carried caveats.
 missing_data: each absent / errored specialist and what the report therefore \
 cannot cover; plus within-specialist gaps a specialist itself flagged (market_data \
-"missing" fields, filings "metric not disclosed", etc.)."""
+"missing" fields, filings "metric not disclosed", etc.).
+
+Everything except key_claims.sources and the specialist_a / specialist_b fields is \
+read by investors: refer to sources as "market data", "news coverage" or "the annual \
+report", never by internal names (market_data, news_sentiment, filings), tool names \
+(get_ratios) or field names (as_of, may_contain_tabular_data); write dates as \
+"21 Sep 2026", not timestamps."""
 
 
 # --------------------------------------------------------------------------- #

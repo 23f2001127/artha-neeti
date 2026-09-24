@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import RoutingPanel from "../progress/RoutingPanel";
 import FollowUpDrawer from "../followup/FollowUpDrawer";
 import CompanyDashboard from "./CompanyDashboard";
@@ -9,6 +9,7 @@ import { useVisuals } from "./useVisuals";
 import { downloadReportPdf, ApiError } from "../../lib/api";
 import { DownloadIcon, PlusIcon } from "../../components/ui/icons";
 import { formatDate } from "../../lib/format";
+import { readableReport } from "../../lib/prose";
 
 function DownloadPdfButton({ jobId, tickers }) {
   const [state, setState] = useState("idle");
@@ -81,7 +82,7 @@ function Notice({ title, body, onNewQuery }) {
 }
 
 export default function ReportView({ job, onNewQuery, onOpenJob }) {
-  const report = job.report;
+  const report = useMemo(() => readableReport(job.report), [job.report]);
   const { visuals, loading: chartsLoading } = useVisuals(job);
   const tickers = Object.keys(report?.reports || {});
   const isMulti = tickers.length > 1;
