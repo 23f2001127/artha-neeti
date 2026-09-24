@@ -63,7 +63,7 @@ def test_full_synthesis(specialist_outputs: dict) -> None:
         assert key in r
     assert any("tcs" in norm_text(c) or "tata" in norm_text(c) for c in r["companies"])
     assert len(r.get("executive_summary", "")) > 120
-    assert set(r["sections"]) == set(SPECIALISTS)
+    assert set(r["sections"]) | set(r["unavailable"]) == set(SPECIALISTS)
     assert all(len(r["sections"][k]) > 40 for k in ok)
 
     claims = r["sources_by_claim"]
@@ -97,8 +97,8 @@ def test_partial_synthesis_reports_missing_filings(specialist_outputs: dict) -> 
     assert "error" not in r, r.get("error")
     assert len(r.get("executive_summary", "")) > 120
     assert "filings" not in r.get("specialists_used", [])
-    assert any("filings" in norm_text(m) for m in r["missing_data"]), r["missing_data"]
-    assert norm_text(r["sections"].get("filings", "")).startswith("not available")
+    assert any("annual-report" in norm_text(m) for m in r["missing_data"]), r["missing_data"]
+    assert "filings" in r["unavailable"] and "filings" not in r["sections"]
     assert len(r["sections"].get("market_data", "")) > 40
     assert len(r["sections"].get("news_sentiment", "")) > 40
     invented = [c for c, m in r["sources_by_claim"].items() if any("filings" in s.lower() for s in m["sources"])]

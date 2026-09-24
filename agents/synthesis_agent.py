@@ -240,6 +240,24 @@ def _looks_like_gen_failure(exc: BaseException) -> bool:
     return any(m in t for m in _GEN_FAILURE_MARKERS)
 
 
+
+_SECTION_NAMES = {
+    "market_data": "Market data",
+    "news_sentiment": "News coverage",
+    "filings": "Annual-report analysis",
+}
+
+
+def _unavailable_reason(error: Any) -> str:
+    """User-facing reason a specialist's section is missing; never the raw exception."""
+    text = str(error or "").lower()
+    if "rate limit" in text or "quota" in text:
+        return "The data provider's usage limit was reached during this run."
+    if "too large" in text:
+        return "The source material was too large to process in this run."
+    return "This source could not be retrieved during this run."
+
+
 async def _invoke_structured(structured, msgs: list, attempts: int = 4) -> _SynthesisReport:
     """A structured-output call that survives a degenerate generation. Groq's
     gpt-oss models occasionally loop a token run until the function-call JSON is
@@ -334,13 +352,14 @@ async def synthesize(
         "filings": report.filings_section,
     }
     sections: dict[str, str] = {}
+    unavailable: dict[str, str] = {}
     for key, field in section_fields.items():
         if key in ok:
-            sections[key] = (field or "").strip() or (ok[key].get("summary") or "(no section text)")
+            sections[key] = (field or "").strip() or (ok[key].get("summary") or "")
         elif key in failed:
-            sections[key] = f"Not available - {key} agent errored: {str(failed[key].get('error'))[:160]}"
+            unavailable[key] = _unavailable_reason(failed[key].get("error"))
         else:
-            sections[key] = f"Not available - {key} agent output was not provided to synthesis."
+            unavailable[key] = "Not part of this analysis."
 
     sources_by_claim = {
         c.claim: {
@@ -351,14 +370,12 @@ async def synthesize(
     }
 
     missing_data = list(report.missing_data or [])
-    for k in missing:  # guarantee structural gaps are recorded even if the model dropped them
+    for k in missing:
         if not any(k in m for m in missing_data):
-            missing_data.append(
-                f"{k}: agent output not provided - that perspective is absent from this report."
-            )
+            missing_data.append(f"{_SECTION_NAMES.get(k, k)} is not part of this analysis.")
     for k, v in failed.items():
         if not any(k in m for m in missing_data):
-            missing_data.append(f"{k}: agent errored ({str(v.get('error'))[:120]}).")
+            missing_data.append(f"{_SECTION_NAMES.get(k, k)}: {_unavailable_reason(v.get('error'))}")
 
     trace.append({
         "step": "synthesis_report",
@@ -373,6 +390,7 @@ async def synthesize(
         "companies": report.companies,
         "executive_summary": report.executive_summary,
         "sections": sections,
+        "unavailable": unavailable,
         "conflicts_flagged": [c.model_dump() for c in report.conflicts_flagged],
         "overall_caveats": report.overall_caveats,
         "missing_data": missing_data,
