@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { useTheme } from "../../lib/ThemeContext";
+import { useTheme } from "../../app/ThemeContext";
 
 export default function ThemeToggle() {
   const { theme, toggle } = useTheme();

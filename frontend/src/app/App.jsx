@@ -1,13 +1,13 @@
 import { motion } from "framer-motion";
 import { useCallback, useEffect, useState } from "react";
-import Header from "./components/layout/Header";
-import LandingPage from "./components/landing/LandingPage";
-import QueryView from "./components/query/QueryView";
-import ProgressView from "./components/progress/ProgressView";
-import ReportView from "./components/report/ReportView";
-import { useJobPolling } from "./hooks/useJobPolling";
-import { ThemeProvider } from "./lib/ThemeContext";
-import { submitResearch } from "./lib/api";
+import Header from "../components/layout/Header";
+import LandingPage from "../features/landing/LandingPage";
+import QueryView from "../features/query/QueryView";
+import ProgressView from "../features/progress/ProgressView";
+import ReportView from "../features/report/ReportView";
+import { useJobPolling } from "../hooks/useJobPolling";
+import { ThemeProvider } from "./ThemeContext";
+import { submitResearch } from "../lib/api";
 
 function jobIdFromUrl() {
   return new URLSearchParams(window.location.search).get("job");

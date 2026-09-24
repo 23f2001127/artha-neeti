@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import AgentGraph from "../common/AgentGraph";
+import AgentGraph from "../../components/agent-graph/AgentGraph";
 
 const BASE = [
   { id: "market_data", label: "Market Data", sub: "yfinance" },

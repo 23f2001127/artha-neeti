@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import ThemeToggle from "../layout/ThemeToggle";
+import ThemeToggle from "../../components/layout/ThemeToggle";
 import HeroDiagram from "./HeroDiagram";
 import StatCounter from "./StatCounter";
 import ExampleGallery from "./ExampleGallery";

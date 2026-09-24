@@ -3,7 +3,7 @@ import RoutingPanel from "../progress/RoutingPanel";
 import CompanyReportCard from "./CompanyReportCard";
 import ComparisonView from "./ComparisonView";
 import PortfolioView from "./PortfolioView";
-import FollowUpPanel from "./FollowUpPanel";
+import FollowUpPanel from "../followup/FollowUpPanel";
 import { downloadReportPdf, ApiError } from "../../lib/api";
 
 function CopyLinkButton() {

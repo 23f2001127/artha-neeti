@@ -1,7 +1,7 @@
 import { motion } from "framer-motion";
 import { useEffect, useMemo, useState } from "react";
-import AgentGraph from "../common/AgentGraph";
-import { deriveAgentGraph } from "../../lib/deriveAgentGraph";
+import AgentGraph from "../../components/agent-graph/AgentGraph";
+import { deriveAgentGraph } from "../../components/agent-graph/deriveAgentGraph";
 import RoutingPanel from "./RoutingPanel";
 import SpecialistGrid from "./SpecialistGrid";
 import TimeGauge from "./TimeGauge";
