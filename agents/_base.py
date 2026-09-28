@@ -396,6 +396,14 @@ def extract_trace(messages: list) -> list[dict]:
     return trace
 
 
+def server_params(server_path: str) -> StdioServerParameters:
+    """Launch settings for an MCP server subprocess. The MCP client passes only a
+    small whitelist of environment variables by default; the servers need the
+    API keys, DATABASE_URL and limiter settings, which in a container exist only
+    in the environment, not in a .env file."""
+    return StdioServerParameters(command=sys.executable, args=[server_path], env=dict(os.environ))
+
+
 # --------------------------------------------------------------------------- #
 # the shared driver
 # --------------------------------------------------------------------------- #
@@ -462,7 +470,7 @@ async def run_agent(
             except Exception:  # noqa: BLE001 - progress reporting is never fatal
                 pass
 
-    params = StdioServerParameters(command=sys.executable, args=[server_path])
+    params = server_params(server_path)
     call_log: list[dict] = []
     try:
         stage("connecting...")
