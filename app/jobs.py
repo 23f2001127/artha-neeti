@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from agents import planner
@@ -58,7 +59,7 @@ def _progress_writer(job_id: str) -> Callable[[dict], None]:
             # Estimated once, when the run's shape is known, so the client has a
             # stable number to count down from.
             try:
-                seconds, samples = db.estimate_duration_seconds(frag["mode"])
+                seconds, samples = db.estimate_duration_seconds(frag["mode"], db.planned_tasks(frag.get("routing")))
             except Exception:  # noqa: BLE001 - an ETA is a nicety, never fatal
                 seconds, samples = None, 0
             if seconds is not None:
@@ -75,6 +76,10 @@ def _progress_writer(job_id: str) -> Callable[[dict], None]:
 
 
 RUN_FAILED_MESSAGE = "The research run failed unexpectedly. Please try again."
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 async def _heartbeat(job_id: str) -> None:
@@ -108,12 +113,13 @@ async def _run(job_id: str, query: str) -> None:
     # specialists failed still produces a degraded report.
     if isinstance(result, dict) and "error" in result and "routing" not in result:
         log.error("job %s failed: %s", job_id, result["error"])
-        db.update_job(job_id, status="error", error=RUN_FAILED_MESSAGE, report=result)
+        db.update_job(job_id, status="error", error=RUN_FAILED_MESSAGE, report=result, finished_at=_now())
     else:
         result["visuals"] = await build_visuals(result)
         db.update_job(
             job_id,
             status="done",
+            finished_at=_now(),
             report=result,
             specialist_status=(result or {}).get("specialist_status"),
         )

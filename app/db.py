@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import statistics
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -50,6 +51,12 @@ ALTER TABLE research_jobs ADD COLUMN IF NOT EXISTS parent_job_id uuid REFERENCES
 CREATE INDEX IF NOT EXISTS research_jobs_conversation_idx ON research_jobs (conversation_id);
 -- every job is a valid conversation root until it's known to be a follow-up
 UPDATE research_jobs SET conversation_id = job_id WHERE conversation_id IS NULL;
+-- updated_at moves whenever a finished report is touched (chart backfill), so
+-- run duration needs its own timestamp. Older jobs are backfilled only where
+-- updated_at still looks like a completion time.
+ALTER TABLE research_jobs ADD COLUMN IF NOT EXISTS finished_at timestamptz;
+UPDATE research_jobs SET finished_at = updated_at
+ WHERE finished_at IS NULL AND status = 'done' AND updated_at - created_at < interval '2 hours';
 
 CREATE TABLE IF NOT EXISTS followup_turns (
     id               bigserial   PRIMARY KEY,
@@ -92,7 +99,7 @@ ALTER TABLE filing_upload_jobs ADD COLUMN IF NOT EXISTS detail text;
 
 _UPDATABLE = {
     "status", "routing_trace", "routing", "specialist_status", "report", "error",
-    "estimated_duration_seconds", "estimated_duration_samples",
+    "estimated_duration_seconds", "estimated_duration_samples", "finished_at",
 }
 _JSONB = {"routing_trace", "routing", "specialist_status", "report"}
 
@@ -207,32 +214,51 @@ def get_job(job_id: str) -> dict | None:
     return dict(row) if row else None
 
 
-def estimate_duration_seconds(mode: str) -> tuple[float | None, int]:
-    """Average duration of past completed jobs in the same routing mode, as
-    ``(seconds, sample_count)``. Falls back to all completed jobs when the mode
-    has fewer than two samples, and to ``(None, 0)`` with no history. Finer
-    buckets (company count, specialists) would mostly be empty at current volume.
+def planned_tasks(routing: dict | None) -> int:
+    """Number of (company, specialist) runs a routing decision schedules."""
+    plan = (routing or {}).get("sub_queries") or {}
+    return sum(len(specialists or {}) for specialists in plan.values())
+
+
+_ESTIMATE_HISTORY = 60
+
+
+def estimate_duration_seconds(mode: str, tasks: int) -> tuple[float | None, int]:
+    """Expected run time for a job of this routing mode with `tasks` planned
+    specialist runs, as ``(seconds, sample_count)``.
+
+    Uses the median seconds per specialist run over recent completed jobs of the
+    same mode (multi-company runs execute one specialist at a time, so they are
+    slower per run), falling back to all modes with fewer than two samples, and
+    to ``(None, 0)`` without history.
     """
+    if tasks <= 0:
+        return None, 0
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT
-                avg(extract(epoch FROM (updated_at - created_at)))
-                    FILTER (WHERE report ->> 'mode' = %(mode)s) AS mode_avg,
-                count(*) FILTER (WHERE report ->> 'mode' = %(mode)s) AS mode_n,
-                avg(extract(epoch FROM (updated_at - created_at))) AS overall_avg,
-                count(*) AS overall_n
+            SELECT report ->> 'mode', routing, extract(epoch FROM finished_at - created_at)
             FROM research_jobs
-            WHERE status = 'done' AND report IS NOT NULL
+            WHERE status = 'done' AND finished_at IS NOT NULL AND routing IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT %s
             """,
-            {"mode": mode},
+            (_ESTIMATE_HISTORY,),
         )
-        mode_avg, mode_n, overall_avg, overall_n = cur.fetchone()
-    if mode_n and mode_n >= 2:
-        return float(mode_avg), int(mode_n)
-    if overall_n:
-        return float(overall_avg), int(overall_n)
-    return None, 0
+        rows = cur.fetchall()
+
+    per_task: dict[str, list[float]] = {}
+    for row_mode, routing, seconds in rows:
+        n = planned_tasks(routing)
+        if n and seconds and seconds > 0:
+            per_task.setdefault(row_mode, []).append(float(seconds) / n)
+
+    samples = per_task.get(mode) or []
+    if len(samples) < 2:
+        samples = [x for values in per_task.values() for x in values]
+    if not samples:
+        return None, 0
+    return statistics.median(samples) * tasks, len(samples)
 
 
 # --------------------------------------------------------------------------- #

@@ -22,6 +22,9 @@ function remainingLabel(job, elapsed) {
   const remaining = Math.round(est - elapsed);
   const samples = job.estimated_duration_samples;
   const secondary = `Based on ${samples} recent report${samples === 1 ? "" : "s"} like this one`;
+  if (remaining < -60) {
+    return { primary: "Taking longer than usual", secondary: `Reports like this usually take about ${Math.ceil(est / 60)} min` };
+  }
   if (remaining <= 10) return { primary: "Almost done", secondary };
   const minutes = Math.ceil(remaining / 60);
   return { primary: `About ${minutes} min remaining`, secondary };
