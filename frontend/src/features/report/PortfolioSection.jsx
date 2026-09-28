@@ -52,11 +52,13 @@ export default function PortfolioSection({ portfolio, visuals, tickers }) {
 
   return (
     <div className="space-y-4">
-      <section className="relative overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] p-6">
-        <div className="absolute inset-x-0 top-0 h-[3px] accent-rule-gradient" />
-        <h3 className="text-[12.5px] font-semibold uppercase tracking-[0.08em] text-[var(--color-brand)] mb-2.5">Portfolio view</h3>
-        <p className="text-[16px] leading-[1.7] text-[var(--color-ink)]">{portfolio.narrative}</p>
-      </section>
+      {portfolio.narrative && (
+        <section className="relative overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] p-6">
+          <div className="absolute inset-x-0 top-0 h-[3px] accent-rule-gradient" />
+          <h3 className="text-[12.5px] font-semibold uppercase tracking-[0.08em] text-[var(--color-brand)] mb-2.5">Portfolio view</h3>
+          <p className="text-[16px] leading-[1.7] text-[var(--color-ink)]">{portfolio.narrative}</p>
+        </section>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <Stat label="Weighted P/E" value={formatMultiple(portfolio.weighted_pe_ratio)} />
@@ -72,10 +74,12 @@ export default function PortfolioSection({ portfolio, visuals, tickers }) {
       {visuals?.comparison && <PeerMetricsGrid metrics={visuals.comparison.metrics} tickers={tickers} />}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
-        <section className="rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] p-5">
-          <h3 className="text-[14.5px] font-semibold text-[var(--color-ink)] mb-2">Diversification</h3>
-          <p className="text-[14px] leading-relaxed text-[var(--color-ink-muted)]">{portfolio.diversification}</p>
-        </section>
+        {portfolio.diversification && (
+          <section className="rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] p-5">
+            <h3 className="text-[14.5px] font-semibold text-[var(--color-ink)] mb-2">Diversification</h3>
+            <p className="text-[14px] leading-relaxed text-[var(--color-ink-muted)]">{portfolio.diversification}</p>
+          </section>
+        )}
         {portfolio.concentration_risks?.length > 0 && (
           <section className="rounded-[var(--radius-lg)] border border-[var(--color-conflict-border)] bg-[var(--color-conflict-tint)] p-5">
             <h3 className="text-[14.5px] font-semibold text-[var(--color-ink)] mb-3">Concentration risks</h3>

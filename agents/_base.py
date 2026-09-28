@@ -45,7 +45,9 @@ REPO_ROOT = _REPO_ROOT
 # the chain must support tool calling: a model that only answers plain prompts
 # fails every specialist. GROQ_AGENT_MODEL overrides the primary.
 DEFAULT_MODEL = os.environ.get("GROQ_AGENT_MODEL", "openai/gpt-oss-120b")
-FALLBACK_MODELS = ("qwen/qwen3.8-27b", "openai/gpt-oss-20b", "openai/gpt-oss-safeguard-20b")
+# qwen/qwen3.8-27b is not in the chain: its free tier allows 1,000 output tokens
+# per minute, below the output budget of a single agent call.
+FALLBACK_MODELS = ("openai/gpt-oss-20b", "openai/gpt-oss-safeguard-20b")
 RECURSION_LIMIT = 16
 
 
@@ -158,6 +160,20 @@ def is_generation_error(exc: BaseException) -> bool:
     )
 
 
+def is_output_limit_error(exc: BaseException) -> bool:
+    """The model's output-tokens-per-minute cap is below the requested max_tokens;
+    trimming the input cannot help, another model might."""
+    return "output tokens per minute" in str(exc).lower()
+
+
+def is_unavailable_error(exc: BaseException) -> bool:
+    """Transient provider-side failure (503, over capacity)."""
+    if getattr(exc, "status_code", None) in (502, 503, 504):
+        return True
+    text = str(exc).lower()
+    return "error code: 503" in text or "service unavailable" in text or "over capacity" in text
+
+
 def is_rate_error(exc: BaseException) -> bool:
     if is_too_large_error(exc) or is_generation_error(exc):
         return False
@@ -244,13 +260,20 @@ class RateLimitedChatGroq(ChatGroq):
                 return "retry"
             state["errors"].append(f"{cand}: malformed tool call")
             return "next"
+        if is_output_limit_error(exc):
+            state["too_large"] = True
+            state["errors"].append(f"{cand}: output limit below this request")
+            return "next"
         if is_too_large_error(exc):
             if attempt == 0:
                 state["messages"], state["budget"] = self._refit_after_413(state["messages"], exc, state["budget"])
                 return "retry"
-            raise RequestTooLargeError(
-                f"request still exceeds {cand}'s {REQUEST_TOKEN_LIMIT}-token limit after compaction"
-            ) from exc
+            state["too_large"] = True
+            state["errors"].append(f"{cand}: request too large after compaction")
+            return "next"
+        if is_unavailable_error(exc):
+            state["errors"].append(f"{cand}: temporarily unavailable")
+            return "next"
         if is_rate_error(exc):
             state["rate_limited"] = True
             state["errors"].append(f"{cand}: rate limited")
@@ -262,6 +285,8 @@ class RateLimitedChatGroq(ChatGroq):
         detail = " | ".join(state["errors"])
         if state["rate_limited"]:
             return rl.QuotaExceededError(f"all fallback models failed: {detail}")
+        if state.get("too_large"):
+            return RequestTooLargeError(f"all fallback models failed: {detail}")
         return AgentError(f"all fallback models failed: {detail}")
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):

@@ -563,13 +563,20 @@ async def _compare_node(state: PlannerState) -> dict:
         return {"graph_path": ["compare: skipped (fewer than 2 usable reports)"]}
 
     model = _base.make_model(model_name)
-    comp: _Comparison = await model.with_structured_output(_Comparison).ainvoke([
-        _base.SystemMessage(_COMPARE_PROMPT),
-        _base.HumanMessage(
-            f"ORIGINAL USER QUERY:\n{state['query']}\n\n"
-            f"PER-COMPANY REPORTS (JSON):\n{_base.prompt_json(digest)}"
-        ),
-    ])
+    try:
+        comp: _Comparison = await model.with_structured_output(_Comparison).ainvoke([
+            _base.SystemMessage(_COMPARE_PROMPT),
+            _base.HumanMessage(
+                f"ORIGINAL USER QUERY:\n{state['query']}\n\n"
+                f"PER-COMPANY REPORTS (JSON):\n{_base.prompt_json(digest)}"
+            ),
+        ])
+    except Exception as exc:  # noqa: BLE001 - the per-company reports still stand
+        log.warning("comparison step failed: %s", _base.describe_error(exc))
+        return {
+            "errors": [f"comparison: {_base.describe_error(exc)}"],
+            "graph_path": ["compare: failed, per-company reports kept"],
+        }
     if isinstance(comp, dict):
         comp = _Comparison(**comp)
     return {
@@ -672,14 +679,29 @@ async def _portfolio_node(state: PlannerState) -> dict:
     ]
 
     model = _base.make_model(model_name)
-    assessment: _PortfolioAssessment = await model.with_structured_output(_PortfolioAssessment).ainvoke([
-        _base.SystemMessage(_PORTFOLIO_PROMPT),
-        _base.HumanMessage(
-            f"ORIGINAL USER QUERY:\n{state['query']}\n\n"
-            f"COMPUTED WEIGHTED METRICS + SECTOR ALLOCATION (JSON):\n{_base.prompt_json(computed)}\n\n"
-            f"PER-HOLDING REPORTS (JSON):\n{_base.prompt_json(digest)}"
-        ),
-    ])
+    try:
+        assessment: _PortfolioAssessment = await model.with_structured_output(_PortfolioAssessment).ainvoke([
+            _base.SystemMessage(_PORTFOLIO_PROMPT),
+            _base.HumanMessage(
+                f"ORIGINAL USER QUERY:\n{state['query']}\n\n"
+                f"COMPUTED WEIGHTED METRICS + SECTOR ALLOCATION (JSON):\n{_base.prompt_json(computed)}\n\n"
+                f"PER-HOLDING REPORTS (JSON):\n{_base.prompt_json(digest)}"
+            ),
+        ])
+    except Exception as exc:  # noqa: BLE001 - the computed metrics still stand
+        log.warning("portfolio assessment failed: %s", _base.describe_error(exc))
+        return {
+            "portfolio": {
+                **computed,
+                "narrative": None,
+                "diversification": None,
+                "concentration_risks": [],
+                "caveats": ["The written portfolio assessment could not be generated in this run; "
+                            "the weights, metrics and sector allocation above are complete."],
+            },
+            "errors": [f"portfolio: {_base.describe_error(exc)}"],
+            "graph_path": ["portfolio: metrics computed, written assessment failed"],
+        }
     if isinstance(assessment, dict):
         assessment = _PortfolioAssessment(**assessment)
 

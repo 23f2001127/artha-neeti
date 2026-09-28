@@ -127,3 +127,34 @@ def test_malformed_tool_call_retries_then_moves_to_next_model() -> None:
     exc = Exception(_GROQ_TOOL_USE_FAILED)
     assert model._on_failure(exc, "qwen/qwen3.8-27b", 0, state) == "retry"
     assert model._on_failure(exc, "qwen/qwen3.8-27b", 1, state) == "next"
+
+
+_GROQ_OUTPUT_LIMIT = (
+    "Error code: 429 - {'error': {'message': \"Request too large for model `qwen/qwen3.8-27b` in organization "
+    "`org_x` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Requested 1500.\", "
+    "'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+)
+
+
+def _state() -> dict:
+    return {"messages": [], "budget": 6000, "errors": [], "rate_limited": False}
+
+
+def test_output_limit_moves_straight_to_next_model() -> None:
+    model = _base.RateLimitedChatGroq.model_construct()
+    assert model._on_failure(Exception(_GROQ_OUTPUT_LIMIT), "m", 0, _state()) == "next"
+
+
+def test_unavailable_moves_to_next_model() -> None:
+    model = _base.RateLimitedChatGroq.model_construct()
+    exc = Exception("Error code: 503 - {'error': {'message': 'Service Unavailable'}}")
+    assert model._on_failure(exc, "m", 0, _state()) == "next"
+
+
+def test_oversized_request_refits_then_moves_on_and_reports_size() -> None:
+    model = _base.RateLimitedChatGroq.model_construct()
+    state = _state()
+    exc = Exception(_GROQ_413)
+    assert model._on_failure(exc, "m", 0, state) == "retry"
+    assert model._on_failure(exc, "m", 1, state) == "next"
+    assert isinstance(model._exhausted(state), _base.RequestTooLargeError)

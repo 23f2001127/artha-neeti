@@ -18,11 +18,13 @@ and answer follow-up questions.
 
 | Work | Model | Why |
 | --- | --- | --- |
-| Agent reasoning and report writing | Groq `openai/gpt-oss-120b`, then `qwen/qwen3.8-27b`, `openai/gpt-oss-20b`, `openai/gpt-oss-safeguard-20b` | Fast, with a daily free allowance large enough for the 3 to 5 calls each agent makes |
+| Agent reasoning and report writing | Groq `openai/gpt-oss-120b`, then `openai/gpt-oss-20b`, `openai/gpt-oss-safeguard-20b` | Fast, with a daily free allowance large enough for the 3 to 5 calls each agent makes |
 | News sentiment (in research-mcp) | Gemini `gemini-3-flash-preview` chain | Structured classification at low volume |
 | Annual-report embeddings (in filings-rag-mcp) | Gemini `gemini-embedding-001` | Groq has no embedding API |
 
-Every model in the Groq chain must support tool calling. `GROQ_AGENT_MODEL`
+Every model in the Groq chain must support tool calling and allow at least one
+call's output budget (1,500 tokens) per minute; `qwen/qwen3.8-27b` is excluded
+because its free tier caps output at 1,000 tokens a minute. `GROQ_AGENT_MODEL`
 overrides the primary. All LLM calls go through the shared rate limiter
 ([`shared/`](../shared/README.md)); Groq limits by account, so one bucket
 covers the whole chain.
@@ -36,9 +38,10 @@ synthesis step and a provenance extractor. `_base.py` provides the rest:
   requests are fitted under Groq's per-request limit (8,000 tokens of input plus
   output, the same for every model) by shortening the largest tool results.
   Failures are handled by kind:
-  - rate limit: move to the next model;
-  - request too large: refit once with a tighter budget, then fail with
-    `RequestTooLargeError`;
+  - rate limit, provider unavailable (503) or an output cap below the
+    request: move to the next model;
+  - request too large: refit once with a tighter budget, then move to the
+    next model (`RequestTooLargeError` if none can take it);
   - malformed tool call: retry once, then move to the next model.
 - **`load_mcp_tools`**: turns each MCP tool's JSON schema into a LangChain
   `StructuredTool` that calls the server over stdio.
@@ -124,7 +127,7 @@ START → route → gather → synthesize → [compare | portfolio] → finalize
 | route | One LLM call resolves companies to NSE tickers, picks single, comparison or portfolio mode, and selects specialists per company with a reason for each skip. Unknown tickers get a lightweight yfinance existence check. Annual-report analysis is only routed for companies whose report is indexed. |
 | gather | Runs the selected (company, specialist) pairs with bounded concurrency. A failing specialist becomes an error cell, not a crash. |
 | synthesize | One synthesis call per company. |
-| compare | Comparisons: verdict, dimension-by-dimension assessment and caveats over the finished reports. |
+| compare | Comparisons: verdict, dimension-by-dimension assessment and caveats over the finished reports. If this call fails, the per-company reports are still delivered. |
 | portfolio | Portfolios: weights are resolved during routing (given weights normalized to 100, otherwise equal weights, always stated). Weighted P/E, ROE, dividend yield and sector allocation are computed in code; one LLM call writes the narrative, diversification, concentration risks and caveats. It is a composition review, not a correlation or volatility model. |
 | finalize | Assembles the report, routing rationale and sentiment signals for charts. |
 
