@@ -1,8 +1,6 @@
-# Render Blueprint for the ArthaNeeti backend (FastAPI). Deploy: connect this
-# repo on Render and it reads this file automatically ("New +" -> "Blueprint").
-# Secrets (marked sync: false) are never stored here - paste them into
-# Render's own dashboard after the first deploy. See README.md's "Deploying"
-# section for the full walkthrough.
+# Render Blueprint for the ArthaNeeti API. On Render: New > Blueprint, then
+# choose this repository. Secrets (sync: false) are entered in the Render
+# dashboard, never committed. Deployment steps are in README.md.
 services:
   - type: web
     name: arthaneeti-api
@@ -12,8 +10,7 @@ services:
     dockerContext: .
     healthCheckPath: /
     envVars:
-      # Required - paste the real values in Render's dashboard (Environment
-      # tab), never here. Same keys as the local .env.example.
+      # Required; the same values as your local .env.
       - key: GROQ_API_KEY
         sync: false
       - key: GEMINI_API_KEY
@@ -22,15 +19,15 @@ services:
         sync: false
       - key: DATABASE_URL
         sync: false
-      # Set once the frontend's real deployed URL is known (step 4 of the
-      # deployment walkthrough in README.md) - comma-separated if more than
-      # one origin (e.g. a Vercel preview URL you also want to allow).
+      # The deployed web app's URL (comma-separated for more than one).
       - key: CORS_ALLOWED_ORIGINS
         sync: false
-      # Deployment-only safety limits (app/main.py) - protect the shared
-      # free-tier LLM quota from a public URL getting hammered. Sensible
-      # defaults; tune if needed, see app/README.md.
+      # Protect the shared free-tier LLM quota on a public URL (see app/README.md).
       - key: MAX_DAILY_JOBS
         value: "15"
       - key: IP_THROTTLE_PER_MINUTE
         value: "6"
+      # One specialist agent at a time: each runs its own MCP server process,
+      # and two at once can exceed the free plan's 512 MB.
+      - key: PLANNER_MAX_CONCURRENCY
+        value: "1"

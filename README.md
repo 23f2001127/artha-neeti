@@ -194,7 +194,8 @@ Vercel as a static site, both on free plans, using the committed
 3. **Render:** set `CORS_ALLOWED_ORIGINS` to the Vercel URL.
 
 `MAX_DAILY_JOBS` and `IP_THROTTLE_PER_MINUTE` (set in `render.yaml`) protect the
-shared LLM quota on a public deployment. Render's free plan sleeps after 15
+shared LLM quota on a public deployment. `PLANNER_MAX_CONCURRENCY=1` keeps a run
+within the free plan's 512 MB, since each specialist runs its own server process. Render's free plan sleeps after 15
 minutes without traffic and takes up to a minute to wake.
 
 ## Limitations
