@@ -38,8 +38,10 @@ synthesis step and a provenance extractor. `_base.py` provides the rest:
   requests are fitted under Groq's per-request limit (8,000 tokens of input plus
   output, the same for every model) by shortening the largest tool results.
   Failures are handled by kind:
-  - rate limit, provider unavailable (503) or an output cap below the
-    request: move to the next model;
+  - rate limit, provider unavailable (503), dropped connection or an output
+    cap below the request: move to the next model. If every model was refused
+    for its per-minute limit, wait for the provider's suggested interval and
+    run the chain again (three rounds at most); daily limits are not retried;
   - request too large: refit once with a tighter budget, then move to the
     next model (`RequestTooLargeError` if none can take it);
   - malformed tool call: retry once, then move to the next model.

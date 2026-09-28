@@ -158,3 +158,31 @@ def test_oversized_request_refits_then_moves_on_and_reports_size() -> None:
     assert model._on_failure(exc, "m", 0, state) == "retry"
     assert model._on_failure(exc, "m", 1, state) == "next"
     assert isinstance(model._exhausted(state), _base.RequestTooLargeError)
+
+
+_GROQ_TPM_429 = ("Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-120b` "
+                 "on tokens per minute (TPM): Limit 8000, Used 7900, Requested 900. Please try again in 7.5s.'}}")
+_GROQ_TPD_429 = ("Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-120b` "
+                 "on tokens per day (TPD): Limit 200000, Used 199000. Please try again in 12m30s.'}}")
+
+
+def _exhaust(model, exc) -> dict:
+    state = _state()
+    for cand in ("a", "b", "c"):
+        assert model._on_failure(exc, cand, 0, state) == "next"
+    return state
+
+
+def test_per_minute_limits_on_every_model_wait_and_retry() -> None:
+    model = _base.RateLimitedChatGroq.model_construct()
+    state = _exhaust(model, Exception(_GROQ_TPM_429))
+    assert model._new_round(state) == 7.5
+    state = _exhaust(model, Exception(_GROQ_TPM_429)) | {"round": 2}
+    assert model._new_round(state) is None, "gives up after the last round"
+
+
+def test_daily_limits_do_not_wait() -> None:
+    model = _base.RateLimitedChatGroq.model_construct()
+    state = _exhaust(model, Exception(_GROQ_TPD_429))
+    assert model._new_round(state) is None
+    assert isinstance(model._exhausted(state), _base.rl.QuotaExceededError)

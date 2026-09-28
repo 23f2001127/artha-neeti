@@ -19,6 +19,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -85,6 +86,21 @@ _OUTPUT_RESERVE = 1500
 _FIT_CHARS_PER_TOKEN = 3.0
 _MIN_KEEP_CHARS = 400
 _REQUESTED_RE = re.compile(r"requested\s+(\d+)", re.IGNORECASE)
+
+# When every model is refused for its per-minute limit, the chain is retried
+# after the provider's suggested wait, up to _RATE_ROUNDS times in total.
+_RATE_ROUNDS = 3
+_DEFAULT_RATE_WAIT = 20.0
+_MAX_RATE_WAIT = 60.0
+_RETRY_AFTER_RE = re.compile(r"try again in ((?:\d+(?:\.\d+)?(?:ms|m|s))+)")
+
+
+def _parse_wait(text: str) -> float:
+    """Seconds in a Groq duration such as "7.5s", "1m2.5s" or "450ms"."""
+    total = 0.0
+    for value, unit in re.findall(r"(\d+(?:\.\d+)?)(ms|m|s)", text):
+        total += float(value) * {"ms": 0.001, "m": 60.0, "s": 1.0}[unit]
+    return total
 
 
 def prompt_json(obj: Any) -> str:
@@ -282,8 +298,25 @@ class RateLimitedChatGroq(ChatGroq):
         if is_rate_error(exc):
             state["rate_limited"] = True
             state["errors"].append(f"{cand}: rate limited")
+            text = str(exc).lower()
+            if "per day" in text or "(tpd)" in text or "(rpd)" in text:
+                state["daily_limit"] = True
+            hint = _RETRY_AFTER_RE.search(text)
+            state["wait"] = max(state.get("wait", 0.0), _parse_wait(hint.group(1)) if hint else _DEFAULT_RATE_WAIT)
             return "next"
         return "raise"
+
+    @staticmethod
+    def _new_round(state: dict) -> float | None:
+        """Seconds to wait before running the model chain again, or None to give up.
+        Only when every model was refused for its per-minute limit."""
+        if state.get("round", 0) >= _RATE_ROUNDS - 1 or not state["rate_limited"] or state.get("daily_limit"):
+            return None
+        if state.get("too_large"):
+            return None
+        wait = min(max(state.get("wait", _DEFAULT_RATE_WAIT), 2.0), _MAX_RATE_WAIT)
+        state.update(round=state.get("round", 0) + 1, rate_limited=False, wait=0.0)
+        return wait
 
     @staticmethod
     def _exhausted(state: dict) -> BaseException:
@@ -301,20 +334,24 @@ class RateLimitedChatGroq(ChatGroq):
         rid = rl.acquire(estimate_tokens(state["messages"]), "groq", timeout=240.0)
         used = False
         try:
-            for cand in self._candidates():
-                object.__setattr__(self, "model_name", cand)
-                for attempt in range(2):
-                    try:
-                        out = super()._generate(state["messages"], stop, run_manager, **kwargs)
-                        used = True
-                        return out
-                    except BaseException as exc:  # noqa: BLE001
-                        action = self._on_failure(exc, cand, attempt, state)
-                        if action == "raise":
-                            raise
-                        if action == "next":
-                            break
-            raise self._exhausted(state)
+            while True:
+                for cand in self._candidates():
+                    object.__setattr__(self, "model_name", cand)
+                    for attempt in range(2):
+                        try:
+                            out = super()._generate(state["messages"], stop, run_manager, **kwargs)
+                            used = True
+                            return out
+                        except BaseException as exc:  # noqa: BLE001
+                            action = self._on_failure(exc, cand, attempt, state)
+                            if action == "raise":
+                                raise
+                            if action == "next":
+                                break
+                wait = self._new_round(state)
+                if wait is None:
+                    raise self._exhausted(state)
+                time.sleep(wait)
         finally:
             object.__setattr__(self, "model_name", original)
             if not used:
@@ -329,20 +366,24 @@ class RateLimitedChatGroq(ChatGroq):
         )
         used = False
         try:
-            for cand in self._candidates():
-                object.__setattr__(self, "model_name", cand)
-                for attempt in range(2):
-                    try:
-                        out = await super()._agenerate(state["messages"], stop, run_manager, **kwargs)
-                        used = True
-                        return out
-                    except BaseException as exc:  # noqa: BLE001
-                        action = self._on_failure(exc, cand, attempt, state)
-                        if action == "raise":
-                            raise
-                        if action == "next":
-                            break
-            raise self._exhausted(state)
+            while True:
+                for cand in self._candidates():
+                    object.__setattr__(self, "model_name", cand)
+                    for attempt in range(2):
+                        try:
+                            out = await super()._agenerate(state["messages"], stop, run_manager, **kwargs)
+                            used = True
+                            return out
+                        except BaseException as exc:  # noqa: BLE001
+                            action = self._on_failure(exc, cand, attempt, state)
+                            if action == "raise":
+                                raise
+                            if action == "next":
+                                break
+                wait = self._new_round(state)
+                if wait is None:
+                    raise self._exhausted(state)
+                await asyncio.sleep(wait)
         finally:
             object.__setattr__(self, "model_name", original)
             if not used:
