@@ -2,8 +2,11 @@
 # Build from the repository root:  docker build -f docker/backend.Dockerfile .
 
 FROM python:3.11-slim AS build
+# Generous timeout and retries: hosted builders sometimes reach PyPI slowly.
 ENV PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=60 \
+    PIP_RETRIES=10
 RUN python -m venv /opt/venv
 ENV PATH=/opt/venv/bin:$PATH
 COPY requirements.txt .
