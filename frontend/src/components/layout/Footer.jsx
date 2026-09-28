@@ -1,6 +1,6 @@
 import Logo from "./Logo";
-import { GitHubIcon } from "../ui/icons";
-import { AUTHOR_GITHUB_URL, AUTHOR_NAME, REPO_URL } from "../../lib/links";
+import { GitHubIcon, LinkedInIcon } from "../ui/icons";
+import { AUTHOR_GITHUB_URL, AUTHOR_LINKEDIN_URL, AUTHOR_NAME, REPO_URL } from "../../lib/links";
 
 function FooterLink({ href, onClick, children }) {
   const className =
@@ -63,6 +63,15 @@ export default function Footer({ onNavigate, onNewResearch }) {
           >
             <GitHubIcon className="h-4 w-4" />
             GitHub
+          </a>
+          <a
+            href={AUTHOR_LINKEDIN_URL}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-2 text-[13.5px] text-[var(--color-ink-muted)] hover:text-[var(--color-ink)] transition-colors"
+          >
+            <LinkedInIcon className="h-4 w-4" />
+            LinkedIn
           </a>
         </Column>
       </div>

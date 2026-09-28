@@ -213,4 +213,4 @@ minutes without traffic and takes up to a minute to wake.
 
 ## Author
 
-Designed and built by **Antareep Ghosh** ([GitHub](https://github.com/23f2001127)).
+Designed and built by **Antareep Ghosh**: [GitHub](https://github.com/23f2001127) · [LinkedIn](https://www.linkedin.com/in/antareep-ghosh-7a55492bb/)
