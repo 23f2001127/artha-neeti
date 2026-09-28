@@ -106,3 +106,24 @@ def test_prompt_json_is_compact_and_keeps_unicode() -> None:
     text = _base.prompt_json(payload)
     assert text == '{"ticker":"TCS","price":"₹2,135","items":[1,2]}'
     assert len(text) < len(json.dumps(payload, indent=2))
+
+
+_GROQ_TOOL_USE_FAILED = (
+    "Error code: 400 - {'error': {'message': \"Failed to call a function. Please adjust your prompt. "
+    "See 'failed_generation' for more details.\", 'type': 'invalid_request_error', 'code': 'tool_use_failed', "
+    "'failed_generation': '<function=get_ratios>{\"ticker\": \"INFY\", \"shares\": 4130000}'}}"
+)
+
+
+def test_malformed_tool_call_is_not_too_large_even_with_413_in_its_text() -> None:
+    exc = Exception(_GROQ_TOOL_USE_FAILED)
+    assert _base.is_generation_error(exc)
+    assert not _base.is_too_large_error(exc)
+
+
+def test_malformed_tool_call_retries_then_moves_to_next_model() -> None:
+    model = _base.RateLimitedChatGroq.model_construct()
+    state = {"messages": [], "budget": 6000, "errors": [], "rate_limited": False}
+    exc = Exception(_GROQ_TOOL_USE_FAILED)
+    assert model._on_failure(exc, "qwen/qwen3.8-27b", 0, state) == "retry"
+    assert model._on_failure(exc, "qwen/qwen3.8-27b", 1, state) == "next"

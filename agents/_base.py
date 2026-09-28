@@ -138,8 +138,14 @@ def fit_messages(messages: list, max_input_tokens: int) -> list:
 
 
 def is_too_large_error(exc: BaseException) -> bool:
+    """HTTP 413. Matched on the status code, not on "413" anywhere in the text:
+    a 400's message quotes the model's output, which can contain any digits."""
+    if is_generation_error(exc):
+        return False
+    if getattr(exc, "status_code", None) == 413:
+        return True
     text = str(exc).lower()
-    return "413" in text or "request too large" in text or "payload too large" in text
+    return "error code: 413" in text or "request too large" in text or "payload too large" in text
 
 
 def is_generation_error(exc: BaseException) -> bool:
@@ -233,6 +239,11 @@ class RateLimitedChatGroq(ChatGroq):
         """Decide what to do after a failed call: "retry" the same model,
         move to the "next" model, or "raise". Mutates ``state`` (messages,
         budget, errors) for the retry."""
+        if is_generation_error(exc):
+            if attempt == 0:
+                return "retry"
+            state["errors"].append(f"{cand}: malformed tool call")
+            return "next"
         if is_too_large_error(exc):
             if attempt == 0:
                 state["messages"], state["budget"] = self._refit_after_413(state["messages"], exc, state["budget"])
@@ -240,11 +251,6 @@ class RateLimitedChatGroq(ChatGroq):
             raise RequestTooLargeError(
                 f"request still exceeds {cand}'s {REQUEST_TOKEN_LIMIT}-token limit after compaction"
             ) from exc
-        if is_generation_error(exc):
-            if attempt == 0:
-                return "retry"
-            state["errors"].append(f"{cand}: malformed tool call")
-            return "next"
         if is_rate_error(exc):
             state["rate_limited"] = True
             state["errors"].append(f"{cand}: rate limited")
