@@ -10,8 +10,24 @@ import { useJobPolling } from "../hooks/useJobPolling";
 import { ThemeProvider } from "./ThemeContext";
 import { submitResearch } from "../lib/api";
 
-function jobIdFromUrl() {
-  return new URLSearchParams(window.location.search).get("job");
+// Each screen has its own URL so the browser's back and forward buttons move
+// between screens: "/" landing, "?view=research" the question form, "?job=<id>"
+// a run in progress or its report.
+function locationFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const jobId = params.get("job");
+  if (jobId) return { screen: "app", jobId };
+  if (params.get("view") === "research") return { screen: "app", jobId: null };
+  return { screen: "landing", jobId: null };
+}
+
+function urlFor({ screen, jobId }) {
+  const url = new URL(window.location.href);
+  url.search = "";
+  url.hash = "";
+  if (jobId) url.searchParams.set("job", jobId);
+  else if (screen === "app") url.searchParams.set("view", "research");
+  return url;
 }
 
 // Enter-only transitions: AnimatePresence exit tracking is unreliable with this
@@ -31,19 +47,28 @@ function scrollToSection(id) {
 }
 
 function AppShell() {
-  const [jobId, setJobId] = useState(jobIdFromUrl);
-  const [screen, setScreen] = useState(() => (jobIdFromUrl() ? "app" : "landing"));
+  const [location, setLocation] = useState(locationFromUrl);
+  const { screen, jobId } = location;
   const pendingSection = useRef(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
   const { job, pollError } = useJobPolling(jobId);
 
+  const go = useCallback((next, { scrollTop = true } = {}) => {
+    const url = urlFor(next);
+    if (url.href !== window.location.href) window.history.pushState({}, "", url);
+    setLocation(next);
+    if (scrollTop) window.scrollTo({ top: 0 });
+  }, []);
+
   useEffect(() => {
-    const url = new URL(window.location.href);
-    if (jobId) url.searchParams.set("job", jobId);
-    else url.searchParams.delete("job");
-    window.history.replaceState({}, "", url);
-  }, [jobId]);
+    const onPop = () => {
+      setLocation(locationFromUrl());
+      window.scrollTo({ top: 0 });
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
 
   useEffect(() => {
     if (screen === "landing" && pendingSection.current) {
@@ -57,44 +82,29 @@ function AppShell() {
     setSubmitting(true);
     try {
       const { job_id } = await submitResearch(query);
-      setJobId(job_id);
+      go({ screen: "app", jobId: job_id });
     } catch (err) {
       setSubmitError(err.message);
     } finally {
       setSubmitting(false);
     }
-  }, []);
+  }, [go]);
 
-  const goToQuery = useCallback(() => {
-    setJobId(null);
-    setScreen("app");
-    window.scrollTo({ top: 0 });
-  }, []);
-
-  const goToLanding = useCallback(() => {
-    setJobId(null);
-    setScreen("landing");
-    window.scrollTo({ top: 0 });
-  }, []);
+  const goToQuery = useCallback(() => go({ screen: "app", jobId: null }), [go]);
+  const goToLanding = useCallback(() => go({ screen: "landing", jobId: null }), [go]);
+  const openJob = useCallback((viewJobId) => go({ screen: "app", jobId: viewJobId }), [go]);
 
   const navigateTo = useCallback(
     (sectionId) => {
       if (screen === "landing") {
         scrollToSection(sectionId);
       } else {
-        setJobId(null);
-        setScreen("landing");
         pendingSection.current = sectionId;
+        go({ screen: "landing", jobId: null }, { scrollTop: false });
       }
     },
-    [screen],
+    [screen, go],
   );
-
-  const openJob = useCallback((viewJobId) => {
-    setJobId(viewJobId);
-    setScreen("app");
-    window.scrollTo({ top: 0 });
-  }, []);
 
   let content;
   let key;
@@ -105,10 +115,10 @@ function AppShell() {
     key = "query";
     content = <QueryView onSubmit={handleSubmit} submitting={submitting} submitError={submitError} />;
   } else if (!job || job.status === "queued" || job.status === "running") {
-    key = "progress";
+    key = `progress-${jobId}`;
     content = <ProgressView job={job} pollError={pollError} onNewQuery={goToQuery} />;
   } else {
-    key = "report";
+    key = `report-${jobId}`;
     content = <ReportView job={job} onNewQuery={goToQuery} onOpenJob={openJob} />;
   }
 
