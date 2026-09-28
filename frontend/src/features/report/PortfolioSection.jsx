@@ -1,7 +1,7 @@
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 import ChartCard from "../../components/charts/ChartCard";
 import ChartTooltip from "../../components/charts/ChartTooltip";
-import { seriesColor } from "../../components/charts/theme";
+import { ANIMATE, seriesColor } from "../../components/charts/theme";
 import { PeerMetricsGrid } from "../../components/charts/ComparisonCharts";
 import { formatMultiple, formatPct } from "../../lib/format";
 
@@ -15,6 +15,7 @@ function Donut({ title, subtitle, segments }) {
           <PieChart>
             <Tooltip content={<ChartTooltip formatValue={(v) => formatPct(v)} />} />
             <Pie
+              isAnimationActive={ANIMATE}
               data={segments}
               dataKey="pct"
               nameKey="label"

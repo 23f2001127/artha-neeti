@@ -2,8 +2,8 @@ import { useId, useMemo, useState } from "react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import ChartCard from "./ChartCard";
 import ChartTooltip from "./ChartTooltip";
-import { axisTick, gridProps } from "./theme";
-import { formatDate, formatMonth, formatPct, formatPrice, formatShortDate } from "../../lib/format";
+import { axisTick, gridProps, monthStartTicks, niceTicks } from "./theme";
+import { currencySymbol, formatDate, formatMonth, formatPct, formatPrice, formatShortDate } from "../../lib/format";
 
 const RANGES = [
   { id: "1M", days: 21 },
@@ -48,7 +48,7 @@ export default function PriceChart({ history, currency, name }) {
   const last = data[data.length - 1]?.close;
   const change = first ? ((last / first) - 1) * 100 : null;
   const closes = data.map((d) => d.close);
-  const pad = (Math.max(...closes) - Math.min(...closes)) * 0.08 || 1;
+  const yTicks = niceTicks(Math.min(...closes), Math.max(...closes));
 
   return (
     <ChartCard
@@ -81,16 +81,19 @@ export default function PriceChart({ history, currency, name }) {
               tick={axisTick}
               tickLine={false}
               axisLine={false}
-              minTickGap={40}
+              ticks={range === "1M" ? undefined : monthStartTicks(data)}
+              minTickGap={range === "1M" ? 40 : 24}
               tickFormatter={range === "1M" ? formatShortDate : formatMonth}
             />
             <YAxis
-              domain={[Math.min(...closes) - pad, Math.max(...closes) + pad]}
+              domain={[yTicks[0], yTicks[yTicks.length - 1]]}
+              ticks={yTicks}
+              interval={0}
               tick={axisTick}
               tickLine={false}
               axisLine={false}
-              width={56}
-              tickFormatter={(v) => Math.round(v).toLocaleString("en-IN")}
+              width={64}
+              tickFormatter={(v) => `${currencySymbol(currency)}${v.toLocaleString("en-IN")}`}
             />
             <Tooltip
               cursor={{ stroke: "var(--color-border-strong)", strokeWidth: 1 }}

@@ -12,6 +12,7 @@ import io
 import math
 import re
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable
 from xml.sax.saxutils import escape
@@ -220,9 +221,14 @@ def fmt_date(value: Any, pattern: str = "%d %b %Y") -> str:
     if not value:
         return ""
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).strftime(pattern).lstrip("0")
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
-        return str(value)
+        # News sources often send RFC 2822 dates ("Tue, 01 Sep 2026 04:16:37 GMT").
+        try:
+            parsed = parsedate_to_datetime(str(value))
+        except (TypeError, ValueError):
+            return str(value)
+    return parsed.strftime(pattern).lstrip("0")
 
 
 def _crore_axis(v: float) -> str:
@@ -355,7 +361,7 @@ def returns_chart(returns: dict, width: float = HALF_W, height: float = 118) -> 
         x, w = plot.band(i, len(periods))
         bw = min(18, w * 0.5)
         _bar(plot.d, x + (w - bw) / 2, bw, plot.y(0), plot.y(v), POSITIVE if v >= 0 else NEGATIVE)
-        label_y = plot.y(v) + 3 if v >= 0 else plot.y(v) - 8
+        label_y = plot.y(v) + 4 if v >= 0 else plot.y(v) - 10
         _text(plot.d, x + w / 2, label_y, fmt_pct(v, signed=True), size=7, color=INK, anchor="middle")
         plot.x_label(x + w / 2, p)
     return plot.d

@@ -1,7 +1,7 @@
 import { Bar, BarChart, CartesianGrid, Cell, LabelList, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import ChartCard from "./ChartCard";
 import ChartTooltip from "./ChartTooltip";
-import { axisTick, gridProps, seriesColor } from "./theme";
+import { ANIMATE, axisTick, barEndLabel, gridProps, monthStartTicks, paddedBarDomain, seriesColor } from "./theme";
 import { formatByUnit, formatDate, formatMonth, formatPct } from "../../lib/format";
 
 export function RelativePerformanceChart({ series, tickers }) {
@@ -23,7 +23,7 @@ export function RelativePerformanceChart({ series, tickers }) {
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={series} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
             <CartesianGrid {...gridProps} />
-            <XAxis dataKey="date" tick={axisTick} tickLine={false} axisLine={false} minTickGap={40} tickFormatter={formatMonth} />
+            <XAxis dataKey="date" ticks={monthStartTicks(series)} tick={axisTick} tickLine={false} axisLine={false} minTickGap={24} tickFormatter={formatMonth} />
             <YAxis tick={axisTick} tickLine={false} axisLine={false} width={40} domain={["auto", "auto"]} />
             <ReferenceLine y={100} stroke="var(--color-border-strong)" />
             <Tooltip
@@ -59,20 +59,15 @@ function MetricMini({ metric, tickers }) {
       <p className="text-[12.5px] font-medium text-[var(--color-ink-muted)] mb-2">{metric.label}</p>
       <div style={{ height: 30 + tickers.length * 26 }}>
         <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={data} layout="vertical" margin={{ top: 0, right: 56, bottom: 0, left: 0 }}>
-            <XAxis type="number" hide domain={[(min) => Math.min(0, min), (max) => Math.max(0, max)]} />
+          <BarChart data={data} layout="vertical" margin={{ top: 0, right: 8, bottom: 0, left: 0 }}>
+            <XAxis type="number" hide domain={paddedBarDomain(valid.map((d) => d.value), 0.45)} />
             <YAxis type="category" dataKey="ticker" tick={axisTick} tickLine={false} axisLine={false} width={64} />
             <Tooltip cursor={false} content={<ChartTooltip formatValue={(v) => formatByUnit(v, metric.unit)} />} />
-            <Bar dataKey="value" name={metric.label} barSize={14} radius={4}>
+            <Bar isAnimationActive={ANIMATE} dataKey="value" name={metric.label} barSize={14} radius={4}>
               {data.map((d) => (
                 <Cell key={d.ticker} fill={d.color} />
               ))}
-              <LabelList
-                dataKey="value"
-                position="right"
-                formatter={(v) => formatByUnit(v, metric.unit)}
-                style={{ fill: "var(--color-ink-muted)", fontSize: 11.5, fontWeight: 600 }}
-              />
+              <LabelList dataKey="value" content={barEndLabel((v) => formatByUnit(v, metric.unit))} />
             </Bar>
           </BarChart>
         </ResponsiveContainer>

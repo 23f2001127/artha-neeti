@@ -1,7 +1,7 @@
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import ChartCard from "./ChartCard";
 import ChartTooltip from "./ChartTooltip";
-import { axisTick, gridProps, seriesColor } from "./theme";
+import { ANIMATE, axisTick, gridProps, niceTicks, seriesColor } from "./theme";
 import { formatCroreAxis, formatPct, toCrore } from "../../lib/format";
 
 const fyLabel = (fy) => `FY${String(fy).slice(-2)}`;
@@ -35,8 +35,8 @@ export function RevenueProfitChart({ financials }) {
               cursor={{ fill: "var(--color-surface-muted)" }}
               content={<ChartTooltip formatValue={(v) => `₹${Math.round(v).toLocaleString("en-IN")} Cr`} />}
             />
-            <Bar dataKey="revenue" name="Revenue" fill={seriesColor(0)} radius={[4, 4, 0, 0]} maxBarSize={24} />
-            <Bar dataKey="netIncome" name="Net profit" fill={seriesColor(1)} radius={[4, 4, 0, 0]} maxBarSize={24} />
+            <Bar isAnimationActive={ANIMATE} dataKey="revenue" name="Revenue" fill={seriesColor(0)} radius={[4, 4, 0, 0]} maxBarSize={24} />
+            <Bar isAnimationActive={ANIMATE} dataKey="netIncome" name="Net profit" fill={seriesColor(1)} radius={[4, 4, 0, 0]} maxBarSize={24} />
           </BarChart>
         </ResponsiveContainer>
       </div>
@@ -50,6 +50,8 @@ export function MarginTrendChart({ financials }) {
     .map((f) => ({ fy: fyLabel(f.fiscal_year), operating: f.operating_margin, net: f.net_margin }));
   if (data.length < 2) return null;
 
+  const marginValues = data.flatMap((d) => [d.operating, d.net]).filter((v) => typeof v === "number");
+  const yTicks = niceTicks(Math.min(0, ...marginValues), Math.max(...marginValues));
   const legend = [
     { label: "Operating margin", color: seriesColor(0), shape: "line" },
     { label: "Net margin", color: seriesColor(1), shape: "line" },
@@ -61,8 +63,17 @@ export function MarginTrendChart({ financials }) {
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
             <CartesianGrid {...gridProps} />
-            <XAxis dataKey="fy" tick={axisTick} tickLine={false} axisLine={false} />
-            <YAxis tick={axisTick} tickLine={false} axisLine={false} width={44} tickFormatter={(v) => `${v}%`} domain={["auto", "auto"]} />
+            <XAxis dataKey="fy" tick={axisTick} tickLine={false} axisLine={false} padding={{ left: 24, right: 24 }} />
+            <YAxis
+              tick={axisTick}
+              tickLine={false}
+              axisLine={false}
+              width={44}
+              tickFormatter={(v) => `${v}%`}
+              domain={[yTicks[0], yTicks[yTicks.length - 1]]}
+              ticks={yTicks}
+              interval={0}
+            />
             <Tooltip
               cursor={{ stroke: "var(--color-border-strong)" }}
               content={<ChartTooltip formatValue={(v) => formatPct(v)} />}
@@ -71,6 +82,7 @@ export function MarginTrendChart({ financials }) {
               <Line
                 key={key}
                 type="monotone"
+                isAnimationActive={ANIMATE}
                 dataKey={key}
                 name={i === 0 ? "Operating margin" : "Net margin"}
                 stroke={seriesColor(i)}
