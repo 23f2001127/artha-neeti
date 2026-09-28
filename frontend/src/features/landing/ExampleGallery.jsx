@@ -12,7 +12,7 @@ const FEATURED = [
     blurb: "Market data, news sentiment and the annual report reconciled into one view, with the tensions between them made explicit.",
   },
   {
-    jobId: "269b9645-f7c3-4d29-b1cf-5cf01cc0237f",
+    jobId: "136a39fd-3179-4bf4-933c-ca86a4f92878",
     kind: "Portfolio review",
     title: "TCS + Infosys portfolio",
     blurb: "An equal-weight two-stock portfolio checked for sector concentration, weighted valuation and shared risks.",
