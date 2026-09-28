@@ -184,13 +184,16 @@ Live tests call the real providers and use free-tier quota; see
 
 The backend deploys to Render as a Docker web service and the frontend to
 Vercel as a static site, both on free plans, using the committed
-`render.yaml` and `vercel.json`.
+`render.yaml` and `frontend/vercel.json`.
+
+Live: <https://artha-neeti.vercel.app> (API: <https://arthaneeti-api.onrender.com>).
 
 1. **Render:** create a Blueprint from this repository. In the service's
    environment settings, add `GROQ_API_KEY`, `GEMINI_API_KEY`,
    `TAVILY_API_KEY` and `DATABASE_URL`. Note the service URL once deployed.
-2. **Vercel:** import the repository and set `VITE_API_BASE_DIRECT` to the
-   Render URL. Note the site URL once deployed.
+2. **Vercel:** import the repository, set **Root Directory** to `frontend`
+   (otherwise Vercel detects the Python API and deploys it as a function), and
+   set `VITE_API_BASE_DIRECT` to the Render URL. Note the site URL once deployed.
 3. **Render:** set `CORS_ALLOWED_ORIGINS` to the Vercel URL.
 
 `MAX_DAILY_JOBS` and `IP_THROTTLE_PER_MINUTE` (set in `render.yaml`) protect the
