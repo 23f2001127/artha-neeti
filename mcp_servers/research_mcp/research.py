@@ -698,6 +698,7 @@ def _sentiment_for_company(ticker_or_name: str) -> dict:
     return {
         "mode": "aggregate",
         "input_kind": "ticker_or_name",
+        "input": str(ticker_or_name).strip(),
         "company": name,
         "query": query,
         "article_count": len(articles),

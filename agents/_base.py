@@ -167,11 +167,16 @@ def is_output_limit_error(exc: BaseException) -> bool:
 
 
 def is_unavailable_error(exc: BaseException) -> bool:
-    """Transient provider-side failure (503, over capacity)."""
+    """Transient provider or network failure (503, over capacity, dropped connection)."""
     if getattr(exc, "status_code", None) in (502, 503, 504):
         return True
+    if type(exc).__name__ in ("APIConnectionError", "APITimeoutError"):
+        return True
     text = str(exc).lower()
-    return "error code: 503" in text or "service unavailable" in text or "over capacity" in text
+    return (
+        "error code: 503" in text or "service unavailable" in text or "over capacity" in text
+        or "connection error" in text
+    )
 
 
 def is_rate_error(exc: BaseException) -> bool:
@@ -427,6 +432,19 @@ def extract_trace(messages: list) -> list[dict]:
     return trace
 
 
+def keyed_results(call_log: list[dict]) -> dict:
+    """Tool results by tool name. A tool called more than once (an agent looking
+    up a peer, say) keeps every result: "get_sentiment", "get_sentiment#2", ..."""
+    out: dict = {}
+    for call in call_log:
+        key, n = call["tool"], 1
+        while key in out:
+            n += 1
+            key = f"{call['tool']}#{n}"
+        out[key] = call["result"]
+    return out
+
+
 def server_params(server_path: str) -> StdioServerParameters:
     """Launch settings for an MCP server subprocess. The MCP client passes only a
     small whitelist of environment variables by default; the servers need the
@@ -521,7 +539,7 @@ async def run_agent(
             "query": query,
             "error": describe_error(exc),
             "tools_called": [c["tool"] for c in call_log],
-            "partial_raw_data": {c["tool"]: c["result"] for c in call_log} or None,
+            "partial_raw_data": keyed_results(call_log) or None,
         }
 
     return {
@@ -530,7 +548,7 @@ async def run_agent(
         "tools_called": [c["tool"] for c in call_log],
         "tool_calls": [{"tool": c["tool"], "args": c["args"]} for c in call_log],
         "provenance": collect_provenance(call_log),
-        "raw_data": {c["tool"]: c["result"] for c in call_log},
+        "raw_data": keyed_results(call_log),
         "reasoning_trace": trace,
         "model": model_name,
     }

@@ -36,6 +36,7 @@ from pydantic import BaseModel, Field
 from agents import _base, filings_agent, market_data_agent, news_sentiment_agent, synthesis_agent
 from agents._base import DEFAULT_MODEL
 from mcp_servers.market_data_mcp import market_data as md
+from mcp_servers.research_mcp import research
 
 log = logging.getLogger(__name__)
 
@@ -721,14 +722,26 @@ async def _portfolio_node(state: PlannerState) -> dict:
 _SIGNAL_ARTICLE_KEYS = ("title", "url", "published_date", "label", "score", "mentions_company")
 
 
+def _about_company(result: dict, ticker: str) -> bool:
+    """Whether an aggregate sentiment result was requested for `ticker`."""
+    base = ticker.upper().removesuffix(".NS").removesuffix(".BO")
+    expected_name = research._resolve_name(base).lower()
+    requested = str(result.get("input") or "").strip()
+    if requested.upper().removesuffix(".NS").removesuffix(".BO") == base or requested.lower() == expected_name:
+        return True
+    return str(result.get("company") or "").lower() == expected_name
+
+
 def _extract_signals(state: PlannerState) -> dict:
     """Structured sentiment per company, lifted from the news specialist's tool
     results so the API can chart it without another LLM call."""
     signals: dict = {}
     for ticker, per in (state.get("specialist_outputs") or {}).items():
         raw = ((per or {}).get("news_sentiment") or {}).get("raw_data") or {}
+        # Only a result about this company: the agent may also have looked up a peer.
         agg = next(
-            (r for r in raw.values() if isinstance(r, dict) and isinstance(r.get("breakdown"), dict)),
+            (r for r in raw.values()
+             if isinstance(r, dict) and isinstance(r.get("breakdown"), dict) and _about_company(r, ticker)),
             None,
         )
         if not agg:
