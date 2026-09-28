@@ -88,6 +88,9 @@ _FALLBACK = Limits(rpm=6, tpm=200_000, rpd=20, tpd=0)
 # instead of minutes; leave it at 60 in real use.
 _MIN_WINDOW = float(os.environ.get("LLM_RL_WINDOW_SECONDS", "60"))
 _PRUNE_AGE = 26 * 3600  # keep ~a day plus slack, so the daily window is always covered
+# Queue places of processes that stopped polling (crashed) expire after this.
+_WAITER_TTL = 15.0
+_QUEUE_POLL = 1.0
 
 
 # --------------------------------------------------------------------------- #
@@ -168,6 +171,13 @@ def _conn() -> sqlite3.Connection:
                    )"""
             )
             conn.execute("CREATE INDEX IF NOT EXISTS ix_bucket_ts ON llm_events (bucket, ts)")
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS llm_waiters (
+                       id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                       bucket TEXT NOT NULL,
+                       seen   REAL NOT NULL
+                   )"""
+            )
             _local.conn = conn
             return conn
         except sqlite3.OperationalError as exc:
@@ -214,72 +224,109 @@ def acquire(
     lim = _limits_for(request_type)
     conn = _conn()
     deadline = time.monotonic() + max(0.0, timeout)
+    ticket: int | None = None
 
-    while True:
-        now = time.time()
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            conn.execute("DELETE FROM llm_events WHERE ts < ?", (now - _PRUNE_AGE,))
+    try:
+        while True:
+            now = time.time()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute("DELETE FROM llm_events WHERE ts < ?", (now - _PRUNE_AGE,))
+                conn.execute("DELETE FROM llm_waiters WHERE seen < ?", (now - _WAITER_TTL,))
 
-            day_start = _day_start_epoch(now)
-            day_reqs, day_tokens = conn.execute(
-                "SELECT COALESCE(SUM(requests), 0), COALESCE(SUM(tokens), 0) "
-                "FROM llm_events WHERE bucket = ? AND ts >= ?",
-                (bucket, day_start),
-            ).fetchone()
-            if day_reqs + n > lim.rpd:
-                _rollback(conn)
-                hrs = (_next_day_start_epoch(now) - now) / 3600.0
-                raise QuotaExceededError(
-                    f"llm quota '{bucket}': daily cap {lim.rpd} would be exceeded "
-                    f"({day_reqs} used, +{n} requested). Resets in ~{hrs:.1f}h "
-                    f"(midnight {_RESET_TZ}). Use a paid key or wait."
-                )
-            if lim.tpd and day_tokens + est > lim.tpd:
-                _rollback(conn)
-                hrs = (_next_day_start_epoch(now) - now) / 3600.0
-                raise QuotaExceededError(
-                    f"llm quota '{bucket}': daily TOKEN budget ~{lim.tpd:,} would be exceeded "
-                    f"(~{day_tokens:,} used, +{est:,} requested). Resets in ~{hrs:.1f}h "
-                    f"(midnight {_RESET_TZ}). Use a paid key or wait."
-                )
+                day_start = _day_start_epoch(now)
+                day_reqs, day_tokens = conn.execute(
+                    "SELECT COALESCE(SUM(requests), 0), COALESCE(SUM(tokens), 0) "
+                    "FROM llm_events WHERE bucket = ? AND ts >= ?",
+                    (bucket, day_start),
+                ).fetchone()
+                if day_reqs + n > lim.rpd:
+                    _rollback(conn)
+                    hrs = (_next_day_start_epoch(now) - now) / 3600.0
+                    raise QuotaExceededError(
+                        f"llm quota '{bucket}': daily cap {lim.rpd} would be exceeded "
+                        f"({day_reqs} used, +{n} requested). Resets in ~{hrs:.1f}h "
+                        f"(midnight {_RESET_TZ}). Use a paid key or wait."
+                    )
+                if lim.tpd and day_tokens + est > lim.tpd:
+                    _rollback(conn)
+                    hrs = (_next_day_start_epoch(now) - now) / 3600.0
+                    raise QuotaExceededError(
+                        f"llm quota '{bucket}': daily TOKEN budget ~{lim.tpd:,} would be exceeded "
+                        f"(~{day_tokens:,} used, +{est:,} requested). Resets in ~{hrs:.1f}h "
+                        f"(midnight {_RESET_TZ}). Use a paid key or wait."
+                    )
 
-            win_start = now - _MIN_WINDOW
-            row = conn.execute(
-                "SELECT COALESCE(SUM(requests), 0), COALESCE(SUM(tokens), 0) "
-                "FROM llm_events WHERE bucket = ? AND ts >= ?",
-                (bucket, win_start),
-            ).fetchone()
-            min_reqs, min_tokens = row[0], row[1]
+                win_start = now - _MIN_WINDOW
+                min_reqs, min_tokens = conn.execute(
+                    "SELECT COALESCE(SUM(requests), 0), COALESCE(SUM(tokens), 0) "
+                    "FROM llm_events WHERE bucket = ? AND ts >= ?",
+                    (bucket, win_start),
+                ).fetchone()
+                # A request larger than the whole per-minute budget runs once the window is empty.
+                token_ok = min_tokens + est <= lim.tpm or (min_tokens == 0 and est > lim.tpm)
+                fits = min_reqs + n <= lim.rpm and token_ok
 
-            token_ok = min_tokens + est <= lim.tpm or (min_tokens == 0 and est > lim.tpm)
-            if min_reqs + n <= lim.rpm and token_ok:
-                cur = conn.execute(
-                    "INSERT INTO llm_events (bucket, ts, tokens, requests) VALUES (?,?,?,?)",
-                    (bucket, now, est, n),
-                )
+                # Requests are served in arrival order: without this, a large
+                # request never sees a free window while small ones keep slipping in.
+                head = conn.execute(
+                    "SELECT MIN(id) FROM llm_waiters WHERE bucket = ?", (bucket,)
+                ).fetchone()[0]
+                my_turn = head is None or head == ticket
+
+                if fits and my_turn:
+                    cur = conn.execute(
+                        "INSERT INTO llm_events (bucket, ts, tokens, requests) VALUES (?,?,?,?)",
+                        (bucket, now, est, n),
+                    )
+                    if ticket is not None:
+                        conn.execute("DELETE FROM llm_waiters WHERE id = ?", (ticket,))
+                        ticket = None
+                    conn.execute("COMMIT")
+                    return int(cur.lastrowid)
+
+                if ticket is None:
+                    ticket = int(conn.execute(
+                        "INSERT INTO llm_waiters (bucket, seen) VALUES (?, ?)", (bucket, now)
+                    ).lastrowid)
+                else:
+                    conn.execute("UPDATE llm_waiters SET seen = ? WHERE id = ?", (now, ticket))
+
+                if fits:
+                    wait = _QUEUE_POLL
+                else:
+                    oldest = conn.execute(
+                        "SELECT MIN(ts) FROM llm_events WHERE bucket = ? AND ts >= ?",
+                        (bucket, win_start),
+                    ).fetchone()[0]
+                    wait = (oldest + _MIN_WINDOW) - now + 0.1 if oldest else _QUEUE_POLL
                 conn.execute("COMMIT")
-                return int(cur.lastrowid)
+            except QuotaExceededError:
+                raise
+            except sqlite3.Error:
+                _rollback(conn)
+                raise
 
-            oldest = conn.execute(
-                "SELECT MIN(ts) FROM llm_events WHERE bucket = ? AND ts >= ?",
-                (bucket, win_start),
-            ).fetchone()[0]
-            _rollback(conn)
-            wait = (oldest + _MIN_WINDOW) - now + 0.1 if oldest else 1.0
-        except QuotaExceededError:
-            raise
-        except sqlite3.Error:
-            _rollback(conn)
-            raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise QuotaExceededError(
+                    f"llm quota '{bucket}': still per-minute rate-limited after "
+                    f"{timeout:.0f}s of waiting."
+                )
+            # Waiters refresh their place well inside _WAITER_TTL.
+            time.sleep(min(max(wait, 0.05), remaining, _QUEUE_POLL * 5))
+    finally:
+        if ticket is not None:
+            _leave_queue(conn, ticket)
 
-        remaining = deadline - time.monotonic()
-        if wait > remaining:
-            raise QuotaExceededError(
-                f"llm quota '{bucket}': still per-minute rate-limited after "
-                f"{timeout:.0f}s of waiting."
-            )
-        time.sleep(min(wait, max(0.2, remaining)))
+
+def _leave_queue(conn: sqlite3.Connection, ticket: int) -> None:
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM llm_waiters WHERE id = ?", (ticket,))
+        conn.execute("COMMIT")
+    except sqlite3.Error:
+        _rollback(conn)
 
 
 def refund(reservation_id: int | None, request_type: str = "generate") -> None:
@@ -359,6 +406,7 @@ def reset() -> None:
     conn.execute("BEGIN IMMEDIATE")
     try:
         conn.execute("DELETE FROM llm_events")
+        conn.execute("DELETE FROM llm_waiters")
         conn.execute("COMMIT")
     except sqlite3.Error:
         _rollback(conn)

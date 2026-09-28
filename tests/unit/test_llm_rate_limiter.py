@@ -129,3 +129,35 @@ def test_daily_cap_raises_quota_exceeded(isolated_limiter, monkeypatch: pytest.M
     isolated_limiter.acquire(10, "generate:cap")
     with pytest.raises(isolated_limiter.QuotaExceededError):
         isolated_limiter.acquire(10, "generate:cap", timeout=1.0)
+
+
+def test_large_request_is_not_starved_by_a_stream_of_small_ones(
+    isolated_limiter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    monkeypatch.setattr(isolated_limiter, "_MIN_WINDOW", 2.0)
+    monkeypatch.setenv("LLM_RL_GROQ_RPM", "1000")
+    monkeypatch.setenv("LLM_RL_GROQ_TPM", "100")
+    monkeypatch.setenv("LLM_RL_GROQ_RPD", "100000")
+    monkeypatch.setenv("LLM_RL_GROQ_TPD", "0")
+    stop = threading.Event()
+
+    def small_requests() -> None:
+        while not stop.is_set():
+            isolated_limiter.acquire(30, "groq", timeout=30.0)
+            time.sleep(0.05)
+        isolated_limiter.close()
+
+    worker = threading.Thread(target=small_requests, daemon=True)
+    worker.start()
+    try:
+        time.sleep(0.5)
+        started = time.monotonic()
+        # Larger than the whole per-minute budget: it can only run in an empty window.
+        isolated_limiter.acquire(150, "groq", timeout=8.0)
+        waited = time.monotonic() - started
+    finally:
+        stop.set()
+        worker.join(timeout=30)
+    assert waited < 5.0

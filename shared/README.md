@@ -16,6 +16,13 @@ serializes the check across processes, evaluates the sliding per-minute window
 and the per-day window, and either records the reservation or waits until the
 window has room.
 
+Requests are served in arrival order. A request that doesn't fit takes a place
+in a queue (`llm_waiters`), and newer requests wait behind it. Without this, a
+request larger than the per-minute budget, which can only run once the window
+is empty, would never get a turn while smaller requests kept arriving. Queue
+places are refreshed while waiting, and those of crashed processes expire after
+15 seconds.
+
 ```
 API process ─────┐
 MCP servers ─────┼──►  .llm_rate_limiter.db   (one IMMEDIATE transaction at a time)
