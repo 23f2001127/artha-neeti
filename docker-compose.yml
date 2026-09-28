@@ -17,6 +17,8 @@ services:
       - "8000:8000"
     volumes:
       - uploads:/app/data/uploads
+      # Rate-limiter ledger: keeps today's quota usage across rebuilds.
+      - ledger:/app/var
     restart: unless-stopped
 
   frontend:
@@ -50,4 +52,5 @@ services:
 
 volumes:
   uploads:
+  ledger:
   pgdata:

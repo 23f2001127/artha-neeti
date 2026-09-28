@@ -6,10 +6,10 @@ import { formatPct, formatPrice } from "../../lib/format";
 
 const FEATURED = [
   {
-    jobId: "26274f73-15a8-4984-a52b-03f995265191",
+    jobId: "98c9ae8c-3462-4339-b4c1-a02a4db7ca11",
     kind: "Company deep dive",
     title: "Tata Consultancy Services",
-    blurb: "Fundamentals, filings and price action reconciled into one view, with the tension between them made explicit.",
+    blurb: "Market data, news sentiment and the annual report reconciled into one view, with the tensions between them made explicit.",
   },
   {
     jobId: "269b9645-f7c3-4d29-b1cf-5cf01cc0237f",
